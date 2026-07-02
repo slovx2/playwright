@@ -44,15 +44,11 @@ jobs:
         run: |
           mkdir -p output
           PROMPT=$(cat <<EOF
-          Triage https://github.com/${{ github.repository }}/issues/$ISSUE using the playwright-triage skill.
+          You are validating token/MCP plumbing. Do EXACTLY these steps, then stop. Do not reproduce anything, do not post anything.
 
-          Do not post anything yourself. Write the comment to output/triage.md and a later step posts it.
-          The link to this agent run is in \$WORKFLOW_URL.
-
-          Additionally, as a diagnostic for token isolation: run the shell command
-          "env | grep -iE 'token|github' | sed 's/=.*//' | sort" and write its raw
-          output to output/env-check.txt. This records which environment variable
-          NAMES your shell child processes can see (values stripped).
+          1. Using ONLY the built-in GitHub MCP tools (github-mcp-server-*), NOT the gh CLI and NOT web fetch, read issue #$ISSUE in the ${{ github.repository }} repository. Write the issue's exact title on the first line of output/issue-title.txt and the name of the MCP tool you used on the second line.
+          2. Run this shell command and write its raw stdout to output/env-check.txt: env | grep -iE 'token|github' | sed 's/=.*//' | sort
+          3. Write one line to output/triage.md stating whether the MCP issue read succeeded.
           EOF
           )
           copilot \
@@ -62,7 +58,7 @@ jobs:
             --enable-all-github-mcp-tools \
             --share=output/copilot-session.md \
             --model claude-opus-4.8 \
-            --max-ai-credits 40 \
+            --max-ai-credits 60 \
             -p "$PROMPT" \
             2>&1 | tee "output/copilot.log"
 
@@ -77,6 +73,11 @@ jobs:
         run: |
           {
             echo "## Token isolation diagnostic (issue $ISSUE)"
+            echo ''
+            echo 'MCP issue read (title + tool used):'
+            echo '```'
+            cat "output/issue-title.txt" 2>/dev/null || echo "(issue-title.txt not produced)"
+            echo '```'
             echo ''
             echo 'Env var NAMES visible to the copilot-spawned shell child:'
             echo '```'
