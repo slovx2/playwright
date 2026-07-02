@@ -1,27 +1,21 @@
-name: "Issue triage"
+name: "Issue triage (token isolation test)"
+
+# TEST-ONLY variant of the triage workflow.
+# Validates: COPILOT_GITHUB_TOKEN (instead of GH_TOKEN) + --enable-all-github-mcp-tools.
+# Triggers on push to this test branch only. Does NOT post to the real issue.
 
 on:
-  # Opt in by applying the "needs-triage" label; re-apply it to trigger another pass.
-  issues:
-    types: [labeled]
-  workflow_dispatch:
-    inputs:
-      issue:
-        description: "Issue number to triage"
-        required: true
+  push:
+    branches: [skn0tt-triage-token-test]
 
-# One triage at a time across the whole repo; let an in-flight run finish.
 concurrency:
-  group: triage
+  group: triage-token-test
   cancel-in-progress: false
 
 permissions: {}
 
 jobs:
   triage:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'issues' && github.event.label.name == 'needs-triage')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -29,7 +23,7 @@ jobs:
     outputs:
       has_draft: ${{ steps.triage.outputs.has_draft }}
     env:
-      ISSUE: ${{ github.event.issue.number || inputs.issue }}
+      ISSUE: "41573"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -45,7 +39,7 @@ jobs:
       - name: Triage issue with Copilot CLI
         id: triage
         env:
-          GH_TOKEN: ${{ github.token }}
+          COPILOT_GITHUB_TOKEN: ${{ github.token }}
           WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           mkdir -p output
@@ -54,12 +48,19 @@ jobs:
 
           Do not post anything yourself. Write the comment to output/triage.md and a later step posts it.
           The link to this agent run is in \$WORKFLOW_URL.
+
+          Additionally, as a diagnostic for token isolation: run the shell command
+          "env | grep -iE 'token|github' | sed 's/=.*//' | sort" and write its raw
+          output to output/env-check.txt. This records which environment variable
+          NAMES your shell child processes can see (values stripped).
           EOF
           )
           copilot \
             --allow-all-tools \
             --allow-all-paths \
             --no-ask-user \
+            --enable-all-github-mcp-tools \
+            --share=output/copilot-session.md \
             --model claude-opus-4.8 \
             --max-ai-credits 5 \
             -p "$PROMPT" \
@@ -71,12 +72,18 @@ jobs:
             echo "has_draft=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Add log to job summary
+      - name: Show token isolation result in job summary
         if: always()
         run: |
           {
-            echo "## Triage run log (issue $ISSUE)"
+            echo "## Token isolation diagnostic (issue $ISSUE)"
             echo ''
+            echo 'Env var NAMES visible to the copilot-spawned shell child:'
+            echo '```'
+            cat "output/env-check.txt" 2>/dev/null || echo "(env-check.txt not produced)"
+            echo '```'
+            echo ''
+            echo '## Copilot run log'
             echo '```'
             cat "output/copilot.log" 2>/dev/null || echo "(no log)"
             echo '```'
@@ -86,27 +93,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: triage-${{ github.event.issue.number || inputs.issue }}
+          name: triage-token-test
           path: output/**
           if-no-files-found: warn
-
-  post:
-    needs: triage
-    if: needs.triage.outputs.has_draft == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write
-    env:
-      ISSUE: ${{ github.event.issue.number || inputs.issue }}
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Download triage output
-        uses: actions/download-artifact@v4
-        with:
-          name: triage-${{ github.event.issue.number || inputs.issue }}
-          path: output
-
-      - name: Post triage comment
-        run: |
-          printf '\n\n<!-- playwright-ai-triage -->\n' >> output/triage.md
-          gh issue comment "$ISSUE" --repo "${{ github.repository }}" --body-file output/triage.md
