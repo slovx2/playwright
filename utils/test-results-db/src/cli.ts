@@ -40,7 +40,7 @@ const DEFAULT_REPO = 'microsoft/playwright';
 
 /** A run that produced blob-report artifacts, with the ids of those artifacts. */
 type BlobRun = {
-  run: RunMetadata;
+  runId: number;
   artifactIds: number[];
 };
 
@@ -108,30 +108,30 @@ async function listBlobRuns(lookbackDays: number): Promise<BlobRun[]> {
       ids.push(artifact.id);
     }
   }
+  return [...artifactIdsByRun].map(([runId, artifactIds]) => ({ runId, artifactIds }));
+}
 
-  const blobRuns: BlobRun[] = [];
-  for (const [runId, artifactIds] of artifactIdsByRun) {
-    const { data: run } = await octokit().actions.getWorkflowRun({
-      owner,
-      repo: repoName,
-      run_id: runId,
-    });
-    const pr = run.pull_requests && run.pull_requests[0];
-    blobRuns.push({
-      run: {
-        runId: run.id,
-        runAttempt: run.run_attempt ?? 1,
-        workflowName: run.name || '',
-        event: run.event ?? null,
-        headSha: run.head_sha ?? null,
-        headBranch: run.head_branch ?? null,
-        prNumber: pr ? pr.number : null,
-        runStartedAt: run.run_started_at ? Date.parse(run.run_started_at) : null,
-      },
-      artifactIds,
-    });
-  }
-  return blobRuns;
+// Full run metadata for a single run. This is one API call per run, so we only
+// fetch it for runs we're actually about to ingest — never for the (usually
+// large) majority that are already in the database.
+async function fetchRunMetadata(runId: number): Promise<RunMetadata> {
+  const { owner, repo: repoName } = repo();
+  const { data: run } = await octokit().actions.getWorkflowRun({
+    owner,
+    repo: repoName,
+    run_id: runId,
+  });
+  const pr = run.pull_requests && run.pull_requests[0];
+  return {
+    runId: run.id,
+    runAttempt: run.run_attempt ?? 1,
+    workflowName: run.name || '',
+    event: run.event ?? null,
+    headSha: run.head_sha ?? null,
+    headBranch: run.head_branch ?? null,
+    prNumber: pr ? pr.number : null,
+    runStartedAt: run.run_started_at ? Date.parse(run.run_started_at) : null,
+  };
 }
 
 async function downloadArtifactZip(artifactId: number): Promise<Buffer> {
@@ -283,39 +283,42 @@ async function cmdUpdate(args: Args): Promise<void> {
   console.log(`  ${startingRows} rows from ${ingested.size} runs`);
 
   const blobRuns = await listBlobRuns(lookbackDays);
-  const newRuns = blobRuns.filter(({ run }) => !ingested.has(`${run.runId}:${run.runAttempt}`));
+  // The dedupe set keys are `${runId}:${runAttempt}`. Artifacts don't carry the
+  // attempt, so we skip at runId granularity — a re-run of an already-ingested
+  // run won't be re-ingested, which is fine for this tool.
+  const ingestedRunIds = new Set([...ingested].map(key => Number(key.split(':')[0])));
+  const newRuns = blobRuns.filter(({ runId }) => !ingestedRunIds.has(runId));
   console.log(`\nScanning for new runs (last ${lookbackDays} days)`);
   console.log(`  found ${blobRuns.length} runs with blob-report artifacts`);
   console.log(`  ${newRuns.length} not yet ingested${newRuns.length > maxRuns ? `, ingesting ${maxRuns}` : ''}`);
 
   let importedRuns = 0;
-  for (const { run, artifactIds } of blobRuns) {
-    const key = `${run.runId}:${run.runAttempt}`;
-    if (ingested.has(key))
-      continue;
+  for (const [index, { runId, artifactIds }] of newRuns.entries()) {
     if (importedRuns >= maxRuns) {
       console.log(`\nReached --max-runs=${maxRuns}; stopping.`);
       break;
     }
+    const progress = `(${index + 1}/${newRuns.length})`;
 
     // Disk-frugal: download this run's blobs to a fresh temp dir, merge/ingest,
     // then delete the temp dir before touching the next run — never accumulate
     // all runs' blobs on the (small) runner disk.
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `trdb-run-${run.runId}-`));
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `trdb-run-${runId}-`));
     try {
       let blobFiles = 0;
       for (const artifactId of artifactIds) {
         const zipBuffer = await downloadArtifactZip(artifactId);
         blobFiles += extractBlobZips(zipBuffer, tempDir);
       }
-      console.log(`\nrun ${run.runId} (${run.workflowName})`);
       if (!blobFiles) {
+        console.log(`\nrun ${runId} ${progress}`);
         console.log(`  artifacts held no blob reports, skipping`);
         continue;
       }
+      const run = await fetchRunMetadata(runId);
+      console.log(`\nrun ${runId} (${run.workflowName}) ${progress}`);
       console.log(`  merging ${blobFiles} blob reports from ${artifactIds.length} artifacts`);
       mergeRunIntoDb(tempDir, run, dest);
-      ingested.add(key);
       importedRuns++;
     } catch (error) {
       // Skip a bad run rather than aborting the whole update.
