@@ -5,7 +5,7 @@
   "description": "PoC: aggregate Playwright CI test results (blob reports) into a single DuckDB file.",
   "type": "module",
   "scripts": {
-    "cli": "node src/cli.ts"
+    "cli": "node cli.ts"
   },
   "engines": {
     "node": ">=23.6.0"

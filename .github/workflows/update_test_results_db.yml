@@ -5,16 +5,14 @@ on:
     branches:
       - skn0tt-test-results-duckdb
 
-# Avoid overlapping runs racing on the shared artifact.
 concurrency:
-  group: update-test-results-db
+  group: test-results-db
   cancel-in-progress: false
 
 jobs:
   update:
     name: Update DuckDB
     runs-on: ubuntu-22.04
-    # Full 5-day ingest can be a couple hundred runs; give it generous headroom.
     timeout-minutes: 180
     if: github.repository == 'microsoft/playwright'
     permissions:
@@ -24,35 +22,23 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: 24
-      # Build the repo: ingestion shells out to this checkout's own
-      # `merge-reports` CLI (packages/playwright/cli.js -> ./lib/program).
-      - name: Install and build Playwright
-        run: |
-          npm ci
-          npm run build
-      # The DuckDB reporter lives in this package and owns the native
-      # @duckdb/node-api dep; the merge child process resolves it from here.
-      - name: Install test-results-db dependencies
-        working-directory: utils/test-results-db
+          node-version: 26
+      - run: npm ci
+      - run: npm run build
+      - working-directory: utils/test-results-db
         run: npm ci
       - name: Download current database
         working-directory: utils/test-results-db
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-        run: node src/cli.ts download
+        run: node cli.ts download
       - name: Ingest new test results
         id: ingest
         working-directory: utils/test-results-db
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          # Explicit repo root for the merge child process (avoids walk-up).
-          TRDB_REPO_ROOT: ${{ github.workspace }}
-          # merge-reports can be memory-hungry on large runs.
           NODE_OPTIONS: --max-old-space-size=8192
-        run: node src/cli.ts update --lookback-days 5 --max-size-mb 800
+        run: node cli.ts update --lookback-days 3 --max-size-mb 800
       - name: Upload database
         if: steps.ingest.outputs.imported != '0'
         uses: actions/upload-artifact@v4

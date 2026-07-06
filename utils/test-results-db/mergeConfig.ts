@@ -14,16 +14,6 @@
  * limitations under the License.
  */
 
-/**
- * Merge config passed to `merge-reports` via `-c` (see cli.ts).
- *
- * Blob reports from different runners record different absolute `testDir`s
- * (Linux `/home/runner/...`, macOS `/Users/runner/...`, Windows `D:\a\...`).
- * Without a merge config, `merge-reports` refuses to merge reports whose
- * `testDir`s disagree. Providing any config supplies a single canonical
- * `rootDir` and lets the merge proceed; `testDir` points at the repo's real
- * tests directory (resolved relative to this file: `<repoRoot>/tests`).
- */
 export default {
-  testDir: '../../../tests',
+  testDir: '../../tests',
 };

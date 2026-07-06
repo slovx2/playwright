@@ -14,25 +14,6 @@
  * limitations under the License.
  */
 
-/**
- * A Playwright reporter that writes one row per test result into the DuckDB
- * test-results database (schema and write path live in `db.ts`).
- *
- * It is invoked by `merge-reports`:
- *
- *   playwright merge-reports <blob-dir> --reporter <this file>
- *
- * `merge-reports` replays a whole run's merged blob reports through the normal
- * reporter API, so this reporter sees standard `TestCase` / `TestResult`
- * objects — no wire-format parsing.
- *
- * The merge step prepends `@<botName>` to every test's tags (see `IdsPatcher`
- * in packages/playwright/src/reporters/merge.ts). We recover the bot name from
- * that tag and strip it back out. GitHub run metadata (run id, sha, pr, ...)
- * isn't present in blob reports, so the CLI injects it as one JSON `TRDB_RUN`
- * env var (plus `TRDB_DB_PATH` for where to write).
- */
-
 import { TABLE_NAME, closeDb, openDb } from './db.ts';
 
 import { timestampValue } from '@duckdb/node-api';
@@ -54,24 +35,13 @@ function firstError(errors: TestError[]): string | null {
   return null;
 }
 
-/**
- * Blob reports carry OS-absolute test paths — e.g. `/home/runner/.../tests/x`
- * on Linux, `D:\a\...\tests\x` on Windows — so the same test looks different
- * per runner. Normalize to a forward-slash path relative to the repo test dir
- * (`tests/...`) so a test's rows agree across operating systems.
- */
 function relativeTestFile(file: string): string {
   const posix = file.replaceAll('\\', '/');
   const i = posix.indexOf('/tests/');
   return i === -1 ? posix : posix.slice(i + 1);
 }
 
-/**
- * Split the merge-injected `@<botName>` tag out of a test's tags. Returns the
- * recovered bot name and the remaining (real) tags.
- */
 function splitBotTag(tags: string[]): { botName: string | null; rest: string[] } {
-  // IdsPatcher unshifts `@<botName>` to the front, so it's the first tag.
   if (tags.length && tags[0].startsWith('@')) {
     const [first, ...rest] = tags;
     return { botName: first.slice(1), rest };
@@ -79,14 +49,6 @@ function splitBotTag(tags: string[]): { botName: string | null; rest: string[] }
   return { botName: null, rest: tags };
 }
 
-/**
- * Reporter runtime, opened once at module load. The reporter always runs in a
- * dedicated `merge-reports` child process (spawned by cli.ts), so we
- * open the db and create the Appender up front via top-level `await` — that
- * makes both available synchronously in `onTestEnd` (Appender append/endRow are
- * sync; only `createAppender` is async), so a run's rows stream straight to
- * disk instead of piling up in a buffer.
- */
 const dbPath = process.env.TRDB_DB_PATH;
 const runJson = process.env.TRDB_RUN;
 if (!dbPath || !runJson)
@@ -95,34 +57,22 @@ const db: Db = await openDb(dbPath);
 const appender: DuckDBAppender = await db.conn.createAppender(TABLE_NAME);
 const run: RunMetadata = JSON.parse(runJson);
 
-// Appender column helpers for the genuinely-nullable columns: null -> SQL NULL,
-// otherwise the typed value. Columns the reporter API guarantees are appended
-// directly below without going through these.
 const varchar = (v: string | null) => v === null ? appender.appendNull() : appender.appendVarchar(v);
 const integer = (v: number | null) => v === null ? appender.appendNull() : appender.appendInteger(v);
-// Stored values are epoch-milliseconds; TIMESTAMP columns are microseconds.
 const tsMillis = (v: number | null) => v === null ? appender.appendNull() : appender.appendTimestamp(timestampValue(BigInt(v) * 1000n));
 
 class DuckDBReporter implements Reporter {
   private _written = 0;
 
   printsToStdio(): boolean {
-    // Returning true tells merge-reports we own stdout, which suppresses its
-    // own progress chatter ("extracting: …", "merging events", "building final
-    // report", …). We print a single clean summary line in onEnd instead.
     return true;
   }
 
   onTestEnd(test: TestCase, result: TestResult): void {
     const { botName, rest } = splitBotTag(test.tags || []);
-    // titlePath(): [ '', projectName, file, ...titles ]. Index 1 is the project.
     const titlePath = test.titlePath();
     const projectName = titlePath[1] || null;
     const title = titlePath.slice(3).join(' > ') || test.title;
-    // Columns must be appended in table order (see createTableSql in db.ts).
-    // Values the reporter API / RunMetadata type guarantee non-null are
-    // appended directly; the varchar/integer/tsMillis helpers mark the columns
-    // that can genuinely be NULL. ingested_at is left to its DEFAULT now().
     appender.appendBigInt(BigInt(run.runId));
     appender.appendInteger(run.runAttempt);
     appender.appendVarchar(run.workflowName);
@@ -132,7 +82,6 @@ class DuckDBReporter implements Reporter {
     integer(run.prNumber);
     varchar(botName);
     varchar(projectName);
-    // test_id intentionally not stored — see the schema comment in db.ts.
     appender.appendVarchar(title);
     appender.appendVarchar(relativeTestFile(test.location.file));
     appender.appendInteger(test.location.line);
@@ -144,7 +93,7 @@ class DuckDBReporter implements Reporter {
     varchar(rest.length ? rest.join(' ') : null);
     tsMillis(result.startTime.getTime());
     tsMillis(run.runStartedAt);
-    appender.appendDefault(); // ingested_at DEFAULT now()
+    appender.appendDefault();
     appender.endRow();
     this._written++;
   }

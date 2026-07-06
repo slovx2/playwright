@@ -20,7 +20,7 @@ gitignored path `utils/test-results-db/test-results.duckdb`:
 ```bash
 cd utils/test-results-db
 npm ci                       # first time only
-GITHUB_TOKEN=$(gh auth token) node src/cli.ts download
+GITHUB_TOKEN=$(gh auth token) node cli.ts download
 ```
 
 The downloaded file can be **trailing** — the maintaining workflow only runs
@@ -29,7 +29,7 @@ to date locally, run `update` after downloading (needs a token; it merges any
 runs missing from the file):
 
 ```bash
-GITHUB_TOKEN=$(gh auth token) node src/cli.ts update --lookback-days 3
+GITHUB_TOKEN=$(gh auth token) node cli.ts update --lookback-days 3
 ```
 
 Then query it with the `duckdb` CLI (or any DuckDB client) — this package's CLI

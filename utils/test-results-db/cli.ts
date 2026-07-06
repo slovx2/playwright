@@ -27,74 +27,26 @@ import { openDb, closeDb, ingestedRuns, rowCount, truncateToSize, fileSize } fro
 
 import type { RunMetadata } from './db.ts';
 
-// -- GitHub -----------------------------------------------------------------
-
-/** Artifact name prefix produced by the test workflows' upload-blob-report action. */
 const BLOB_ARTIFACT_PREFIX = 'blob-report';
 
-/** Name of the artifact that carries the DuckDB file between runs. */
 const DB_ARTIFACT_NAME = 'test-results-db';
 
-/** The repository we ingest from. Overridable via GITHUB_REPOSITORY (CI sets it). */
-const DEFAULT_REPO = 'microsoft/playwright';
+const REPO_OWNER = 'microsoft';
+const REPO_NAME = 'playwright';
 
-/** A run that produced blob-report artifacts, with the ids of those artifacts. */
-type BlobRun = {
-  runId: number;
-  artifactIds: number[];
-};
+const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN || process.env.GH_TOKEN });
 
-// GitHub client + target repo, resolved lazily on first use and memoized: the
-// offline `ingest-local` path needs neither, so we don't demand a token or a
-// valid GITHUB_REPOSITORY until a command actually talks to GitHub.
-let _octokit: Octokit | undefined;
-function octokit(): Octokit {
-  if (!_octokit) {
-    const auth = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
-    if (!auth)
-      throw new Error(`GITHUB_TOKEN (or GH_TOKEN) is required for GitHub access.`);
-    _octokit = new Octokit({ auth });
-  }
-  return _octokit;
-}
-
-let _repo: { owner: string; repo: string } | undefined;
-function repo(): { owner: string; repo: string } {
-  if (!_repo) {
-    const value = process.env.GITHUB_REPOSITORY || DEFAULT_REPO;
-    const [owner, repo] = value.split('/');
-    if (!owner || !repo)
-      throw new Error(`Invalid repository "${value}". Expected "owner/repo".`);
-    _repo = { owner, repo };
-  }
-  return _repo;
-}
-
-/**
- * Find the runs that produced `blob-report*` artifacts within `lookbackDays`.
- *
- * Rather than enumerate workflow runs and guess which are test workflows, we
- * scan the repo's artifacts directly (they're returned newest-first) and keep
- * the ones whose name starts with `blob-report`, grouped by their run. This is
- * fully dynamic — any workflow that uploads blob reports is picked up, no
- * hardcoded workflow-name list. Run metadata (name, event, sha, pr, ...) is
- * then fetched once per matching run.
- */
-async function listBlobRuns(lookbackDays: number): Promise<BlobRun[]> {
-  const { owner, repo: repoName } = repo();
+async function listBlobRuns(lookbackDays: number) {
   const cutoff = Date.now() - lookbackDays * 24 * 60 * 60 * 1000;
-  // Map preserves insertion order, and artifacts arrive newest-first, so
-  // iterating it later yields runs newest-first too.
   const artifactIdsByRun = new Map<number, number[]>();
-  const iterator = octokit().paginate.iterator(octokit().actions.listArtifactsForRepo, {
-    owner,
-    repo: repoName,
+  const iterator = octokit.paginate.iterator(octokit.actions.listArtifactsForRepo, {
+    owner: REPO_OWNER,
+    repo: REPO_NAME,
     per_page: 100,
   });
   outer: for await (const { data } of iterator) {
     for (const artifact of data) {
       const createdAt = artifact.created_at ? Date.parse(artifact.created_at) : 0;
-      // Artifacts come newest-first, so once we cross the window we're done.
       if (createdAt && createdAt < cutoff)
         break outer;
       if (artifact.expired || !artifact.name.startsWith(BLOB_ARTIFACT_PREFIX))
@@ -111,14 +63,10 @@ async function listBlobRuns(lookbackDays: number): Promise<BlobRun[]> {
   return [...artifactIdsByRun].map(([runId, artifactIds]) => ({ runId, artifactIds }));
 }
 
-// Full run metadata for a single run. This is one API call per run, so we only
-// fetch it for runs we're actually about to ingest — never for the (usually
-// large) majority that are already in the database.
 async function fetchRunMetadata(runId: number): Promise<RunMetadata> {
-  const { owner, repo: repoName } = repo();
-  const { data: run } = await octokit().actions.getWorkflowRun({
-    owner,
-    repo: repoName,
+  const { data: run } = await octokit.actions.getWorkflowRun({
+    owner: REPO_OWNER,
+    repo: REPO_NAME,
     run_id: runId,
   });
   const pr = run.pull_requests && run.pull_requests[0];
@@ -135,22 +83,15 @@ async function fetchRunMetadata(runId: number): Promise<RunMetadata> {
 }
 
 async function downloadArtifactZip(artifactId: number): Promise<Buffer> {
-  const { owner, repo: repoName } = repo();
-  const response = await octokit().actions.downloadArtifact({
-    owner,
-    repo: repoName,
+  const response = await octokit.actions.downloadArtifact({
+    owner: REPO_OWNER,
+    repo: REPO_NAME,
     artifact_id: artifactId,
     archive_format: 'zip',
   });
   return Buffer.from(response.data as ArrayBuffer);
 }
 
-/**
- * Map `fn` over `items` with at most `concurrency` in flight at once, returning
- * the results in the original input order. Used to overlap artifact downloads,
- * which are per-request-overhead-bound on the runner (many small artifacts sit
- * far below the single-stream bandwidth ceiling).
- */
 async function mapWithConcurrency<T, R>(items: T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
@@ -166,21 +107,10 @@ async function mapWithConcurrency<T, R>(items: T[], concurrency: number, fn: (it
   return results;
 }
 
-// How many artifact downloads to keep in flight per run. Downloads are I/O-bound
-// on the runner, so a handful of parallel streams overlaps per-request overhead
-// without saturating memory (buffers are held only until extraction).
-const DOWNLOAD_CONCURRENCY = 8;
-
-/**
- * Id of the most recent, non-expired `test-results-db` artifact in the repo, or
- * null if none exists yet. Artifacts come newest-first, so the first
- * non-expired one is the latest.
- */
 async function findLatestDbArtifactId(): Promise<number | null> {
-  const { owner, repo: repoName } = repo();
-  const iterator = octokit().paginate.iterator(octokit().actions.listArtifactsForRepo, {
-    owner,
-    repo: repoName,
+  const iterator = octokit.paginate.iterator(octokit.actions.listArtifactsForRepo, {
+    owner: REPO_OWNER,
+    repo: REPO_NAME,
     name: DB_ARTIFACT_NAME,
     per_page: 100,
   });
@@ -193,16 +123,9 @@ async function findLatestDbArtifactId(): Promise<number | null> {
   return null;
 }
 
-// The database lives at a fixed, package-relative location (gitignored). It is
-// not configurable via a flag — the reporter, the CLI and the workflow all
-// agree on it. `TRDB_DB_PATH` may override it (tests); the reporter reads that
-// same var to learn where to write.
-const DEFAULT_DB_PATH = fileURLToPath(new URL('../test-results.duckdb', import.meta.url));
-
-function resolveDbPath(): string {
-  const override = process.env.TRDB_DB_PATH;
-  return override ? path.resolve(override) : DEFAULT_DB_PATH;
-}
+let DB_PATH = fileURLToPath(new URL('./test-results.duckdb', import.meta.url));
+if (process.env.TRDB_DB_PATH)
+  DB_PATH = path.resolve(process.env.TRDB_DB_PATH);
 
 type Args = {
   positionals: string[];
@@ -238,7 +161,6 @@ function num(args: Args, key: string, fallback: number): number {
   return parsed;
 }
 
-/** Extract the first `.duckdb` file from an artifact zip buffer to destPath. */
 function extractDbFromZip(zipBuffer: Buffer, destPath: string): boolean {
   const zip = new AdmZip(zipBuffer);
   for (const entry of zip.getEntries()) {
@@ -250,13 +172,6 @@ function extractDbFromZip(zipBuffer: Buffer, destPath: string): boolean {
   return false;
 }
 
-/**
- * Extract a blob-report artifact zip into `destDir`, writing each inner blob
- * report (`*.zip`) flat. Mirrors the `unzip -n` behavior of the repo's
- * download-artifact action: never overwrite an existing file (blob report
- * names are unique across bots via their command hash). Returns the number of
- * blob report files written.
- */
 function extractBlobZips(zipBuffer: Buffer, destDir: string): number {
   const zip = new AdmZip(zipBuffer);
   let written = 0;
@@ -264,9 +179,6 @@ function extractBlobZips(zipBuffer: Buffer, destDir: string): number {
     if (entry.isDirectory || !entry.entryName.endsWith('.zip'))
       continue;
     const dest = path.join(destDir, path.basename(entry.entryName));
-    // Blob-report basenames are unique within a run's artifact batch, so a
-    // collision here means that assumption broke — fail loudly rather than
-    // silently dropping a report.
     if (fs.existsSync(dest))
       throw new Error(`Duplicate blob report name in batch: ${path.basename(entry.entryName)}`);
     fs.writeFileSync(dest, entry.getData());
@@ -276,34 +188,30 @@ function extractBlobZips(zipBuffer: Buffer, destDir: string): number {
 }
 
 async function cmdDownload(): Promise<void> {
-  const dest = resolveDbPath();
   const artifactId = await findLatestDbArtifactId();
   if (artifactId === null) {
     console.log(`No existing "${DB_ARTIFACT_NAME}" artifact found; starting a fresh database.`);
-    const db = await openDb(dest);
+    const db = await openDb(DB_PATH);
     await closeDb(db);
-    console.log(`Created empty database at ${dest}`);
+    console.log(`Created empty database at ${DB_PATH}`);
     return;
   }
   console.log(`Downloading "${DB_ARTIFACT_NAME}" artifact #${artifactId} ...`);
   const zipBuffer = await downloadArtifactZip(artifactId);
-  if (!extractDbFromZip(zipBuffer, dest))
+  if (!extractDbFromZip(zipBuffer, DB_PATH))
     throw new Error(`Artifact #${artifactId} did not contain a .duckdb file.`);
-  console.log(`Downloaded database to ${dest} (${formatBytes(fileSize(dest))})`);
+  console.log(`Downloaded database to ${DB_PATH} (${formatBytes(fileSize(DB_PATH))})`);
 }
 
 async function cmdUpdate(args: Args): Promise<void> {
-  const dest = resolveDbPath();
   const lookbackDays = num(args, 'lookback-days', 3);
   const maxSizeMb = num(args, 'max-size-mb', 800);
   const maxRuns = num(args, 'max-runs', Infinity);
 
-  // Read the dedupe set, then close the db: the merge reporter needs exclusive
-  // write access to the file (DuckDB is single-writer).
   let ingested: Set<string>;
   let startingRows: number;
   {
-    const db = await openDb(dest);
+    const db = await openDb(DB_PATH);
     ingested = await ingestedRuns(db);
     startingRows = await rowCount(db);
     await closeDb(db);
@@ -312,9 +220,6 @@ async function cmdUpdate(args: Args): Promise<void> {
   console.log(`  ${startingRows} rows from ${ingested.size} runs`);
 
   const blobRuns = await listBlobRuns(lookbackDays);
-  // The dedupe set keys are `${runId}:${runAttempt}`. Artifacts don't carry the
-  // attempt, so we skip at runId granularity — a re-run of an already-ingested
-  // run won't be re-ingested, which is fine for this tool.
   const ingestedRunIds = new Set([...ingested].map(key => Number(key.split(':')[0])));
   const newRuns = blobRuns.filter(({ runId }) => !ingestedRunIds.has(runId));
   console.log(`\nScanning for new runs (last ${lookbackDays} days)`);
@@ -329,16 +234,12 @@ async function cmdUpdate(args: Args): Promise<void> {
     }
     const progress = `(${index + 1}/${newRuns.length})`;
 
-    // Disk-frugal: download this run's blobs to a fresh temp dir, merge/ingest,
-    // then delete the temp dir before touching the next run — never accumulate
-    // all runs' blobs on the (small) runner disk.
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `trdb-run-${runId}-`));
     try {
       let blobFiles = 0;
       let downloadedBytes = 0;
       const downloadStart = Date.now();
-      // Downloads overlap (bounded); extraction stays serial since it's sync.
-      const zipBuffers = await mapWithConcurrency(artifactIds, DOWNLOAD_CONCURRENCY, downloadArtifactZip);
+      const zipBuffers = await mapWithConcurrency(artifactIds, 8, downloadArtifactZip);
       const downloadMs = Date.now() - downloadStart;
       for (const zipBuffer of zipBuffers) {
         downloadedBytes += zipBuffer.length;
@@ -354,22 +255,20 @@ async function cmdUpdate(args: Args): Promise<void> {
       console.log(`  downloaded ${formatBytes(downloadedBytes)} from ${artifactIds.length} artifacts in ${(downloadMs / 1000).toFixed(1)}s`);
       console.log(`  merging ${blobFiles} blob reports`);
       const mergeStart = Date.now();
-      mergeRunIntoDb(tempDir, run, dest);
+      mergeRunIntoDb(tempDir, run);
       console.log(`  merged in ${((Date.now() - mergeStart) / 1000).toFixed(1)}s`);
       importedRuns++;
     } catch (error) {
-      // Skip a bad run rather than aborting the whole update.
       console.error(`  failed: ${error instanceof Error ? error.message : error}`);
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   }
 
-  // Reopen once at the end for truncation and the final row count.
-  const db = await openDb(dest);
+  const db = await openDb(DB_PATH);
   try {
     const maxBytes = maxSizeMb * 1024 * 1024;
-    const before = fileSize(dest);
+    const before = fileSize(DB_PATH);
     const after = await truncateToSize(db, maxBytes);
     console.log(`\nSummary`);
     console.log(`  imported ${importedRuns} new runs`);
@@ -382,7 +281,6 @@ async function cmdUpdate(args: Args): Promise<void> {
     await closeDb(db);
   }
 
-  // Let CI skip the artifact upload when nothing changed.
   if (process.env.GITHUB_OUTPUT)
     fs.appendFileSync(process.env.GITHUB_OUTPUT, `imported=${importedRuns}\n`);
 }
@@ -391,14 +289,14 @@ async function cmdIngestLocal(args: Args): Promise<void> {
   const dir = args.positionals[0];
   if (!dir)
     throw new Error(`Usage: ingest-local <blob-report-dir> [--run-id <n>]`);
-  const dest = resolveDbPath();
   const runId = num(args, 'run-id', 1);
 
   const zips = fs.readdirSync(dir).filter(f => f.endsWith('.zip'));
   if (!zips.length)
     throw new Error(`No blob report .zip files found in ${dir}. Point this at a directory of merge-ready blob reports.`);
 
-  const metadata: RunMetadata = {
+  console.log(`Merging ${zips.length} blob reports from ${dir} (run ${runId})`);
+  mergeRunIntoDb(dir, {
     runId,
     runAttempt: 1,
     workflowName: 'local',
@@ -407,48 +305,31 @@ async function cmdIngestLocal(args: Args): Promise<void> {
     headBranch: null,
     prNumber: null,
     runStartedAt: Date.now(),
-  };
-  console.log(`Merging ${zips.length} blob reports from ${dir} (run ${runId})`);
-  mergeRunIntoDb(dir, metadata, dest);
+  });
 
-  const db = await openDb(dest);
+  const db = await openDb(DB_PATH);
   try {
-    console.log(`\n${await rowCount(db)} rows total (${formatBytes(fileSize(dest))})`);
+    console.log(`\n${await rowCount(db)} rows total (${formatBytes(fileSize(DB_PATH))})`);
   } finally {
     await closeDb(db);
   }
 }
 
-// -- Merge runner -----------------------------------------------------------
-
-// Path to the DuckDB reporter, resolved relative to this file so it works from
-// any cwd. It lives next to this CLI in src/.
-const REPORTER_PATH = fileURLToPath(new URL('./duckdbReporter.ts', import.meta.url));
-
-// The Playwright repo root, which provides the `merge-reports` CLI. This file
-// always lives at `<repoRoot>/utils/test-results-db/src/cli.ts`, so the root is
-// a fixed three levels up.
-const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
-
-// Merge config forcing cross-OS blob reports (different absolute testDirs) to
-// merge. See mergeConfig.ts.
-const MERGE_CONFIG_PATH = fileURLToPath(new URL('./mergeConfig.ts', import.meta.url));
-
-/**
- * Merge the blob reports in `blobDir` and write rows into `dbPath` via the
- * DuckDB reporter, by spawning the repo's own `merge-reports` CLI. Run metadata
- * is passed to the reporter as one JSON `TRDB_RUN` env var (blob reports don't
- * carry it). Returns when merge-reports exits 0; throws otherwise.
- */
-function mergeRunIntoDb(blobDir: string, run: RunMetadata, dbPath: string): void {
-  const cli = path.join(REPO_ROOT, 'packages/playwright/cli.js');
-  const args = ['merge-reports', path.resolve(blobDir), '-c', MERGE_CONFIG_PATH, '--reporter', REPORTER_PATH];
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  env.TRDB_DB_PATH = path.resolve(dbPath);
-  env.TRDB_RUN = JSON.stringify(run);
-  const result = spawnSync(process.execPath, [cli, ...args], {
-    cwd: REPO_ROOT,
-    env,
+function mergeRunIntoDb(blobDir: string, run: RunMetadata) {
+  const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+  const result = spawnSync(process.execPath, [
+      path.join(repoRoot, 'packages/playwright/cli.js'),
+      'merge-reports',
+      path.resolve(blobDir),
+      '-c', fileURLToPath(new URL('./mergeConfig.ts', import.meta.url)),
+      '--reporter', fileURLToPath(new URL('./duckdbReporter.ts', import.meta.url))
+    ], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      TRDB_DB_PATH: path.resolve(DB_PATH),
+      TRDB_RUN: JSON.stringify(run),
+    },
     stdio: 'inherit',
   });
   if (result.error)
@@ -469,10 +350,10 @@ const USAGE = `test-results-db — maintain a DuckDB file of Playwright CI test 
 
 This CLI only *maintains* the file. To query it, use the DuckDB CLI directly:
 
-  duckdb ${DEFAULT_DB_PATH} "SELECT * FROM test_results LIMIT 10"
+  duckdb ${DB_PATH} "SELECT * FROM test_results LIMIT 10"
 
 Ingestion runs a whole CI run's blob reports through the repo's own
-"merge-reports" CLI, pointed at a DuckDB reporter (src/duckdbReporter.ts).
+"merge-reports" CLI, pointed at a DuckDB reporter (duckdbReporter.ts).
 
 Usage:
   cli download                                          fetch the latest db artifact
@@ -480,12 +361,10 @@ Usage:
   cli ingest-local <blob-report-dir> [--run-id <n>]     (offline/dev)
 
 The database is kept at a fixed, gitignored location:
-  ${DEFAULT_DB_PATH}
-(override with the TRDB_DB_PATH env var).
+  ${DB_PATH}
 
 Environment:
   GITHUB_TOKEN        required for download/update
-  GITHUB_REPOSITORY   repo (owner/repo); defaults to microsoft/playwright
   TRDB_DB_PATH        override the database location
 `;
 
