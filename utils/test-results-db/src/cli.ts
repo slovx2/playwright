@@ -341,6 +341,10 @@ async function cmdUpdate(args: Args): Promise<void> {
   } finally {
     await closeDb(db);
   }
+
+  // Let CI skip the artifact upload when nothing changed.
+  if (process.env.GITHUB_OUTPUT)
+    fs.appendFileSync(process.env.GITHUB_OUTPUT, `imported=${importedRuns}\n`);
 }
 
 async function cmdIngestLocal(args: Args): Promise<void> {

@@ -43,6 +43,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: node src/cli.ts download
       - name: Ingest new test results
+        id: ingest
         working-directory: utils/test-results-db
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -53,6 +54,7 @@ jobs:
           NODE_OPTIONS: --max-old-space-size=8192
         run: node src/cli.ts update --lookback-days 5 --max-size-mb 200
       - name: Upload database
+        if: steps.ingest.outputs.imported != '0'
         uses: actions/upload-artifact@v4
         with:
           name: test-results-db
