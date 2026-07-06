@@ -14,9 +14,8 @@ jobs:
   update:
     name: Update DuckDB
     runs-on: ubuntu-22.04
-    # Build (~10 min) + a handful of capped merges. Default is 360; keep an
-    # explicit, tighter ceiling for the trial.
-    timeout-minutes: 60
+    # Full 5-day ingest can be a couple hundred runs; give it generous headroom.
+    timeout-minutes: 180
     if: github.repository == 'microsoft/playwright'
     permissions:
       actions: read
@@ -52,7 +51,7 @@ jobs:
           TRDB_REPO_ROOT: ${{ github.workspace }}
           # merge-reports can be memory-hungry on large runs.
           NODE_OPTIONS: --max-old-space-size=8192
-        run: node src/cli.ts update --lookback-days 5 --max-runs 5 --max-size-mb 200
+        run: node src/cli.ts update --lookback-days 5 --max-size-mb 200
       - name: Upload database
         uses: actions/upload-artifact@v4
         with:
