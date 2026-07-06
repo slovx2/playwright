@@ -146,6 +146,32 @@ async function downloadArtifactZip(artifactId: number): Promise<Buffer> {
 }
 
 /**
+ * Map `fn` over `items` with at most `concurrency` in flight at once, returning
+ * the results in the original input order. Used to overlap artifact downloads,
+ * which are per-request-overhead-bound on the runner (many small artifacts sit
+ * far below the single-stream bandwidth ceiling).
+ */
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length)
+        return;
+      results[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  return results;
+}
+
+// How many artifact downloads to keep in flight per run. Downloads are I/O-bound
+// on the runner, so a handful of parallel streams overlaps per-request overhead
+// without saturating memory (buffers are held only until extraction).
+const DOWNLOAD_CONCURRENCY = 8;
+
+/**
  * Id of the most recent, non-expired `test-results-db` artifact in the repo, or
  * null if none exists yet. Artifacts come newest-first, so the first
  * non-expired one is the latest.
@@ -238,8 +264,11 @@ function extractBlobZips(zipBuffer: Buffer, destDir: string): number {
     if (entry.isDirectory || !entry.entryName.endsWith('.zip'))
       continue;
     const dest = path.join(destDir, path.basename(entry.entryName));
+    // Blob-report basenames are unique within a run's artifact batch, so a
+    // collision here means that assumption broke — fail loudly rather than
+    // silently dropping a report.
     if (fs.existsSync(dest))
-      continue;
+      throw new Error(`Duplicate blob report name in batch: ${path.basename(entry.entryName)}`);
     fs.writeFileSync(dest, entry.getData());
     written++;
   }
@@ -308,12 +337,13 @@ async function cmdUpdate(args: Args): Promise<void> {
       let blobFiles = 0;
       let downloadedBytes = 0;
       const downloadStart = Date.now();
-      for (const artifactId of artifactIds) {
-        const zipBuffer = await downloadArtifactZip(artifactId);
+      // Downloads overlap (bounded); extraction stays serial since it's sync.
+      const zipBuffers = await mapWithConcurrency(artifactIds, DOWNLOAD_CONCURRENCY, downloadArtifactZip);
+      const downloadMs = Date.now() - downloadStart;
+      for (const zipBuffer of zipBuffers) {
         downloadedBytes += zipBuffer.length;
         blobFiles += extractBlobZips(zipBuffer, tempDir);
       }
-      const downloadMs = Date.now() - downloadStart;
       if (!blobFiles) {
         console.log(`\nrun ${runId} ${progress}`);
         console.log(`  artifacts held no blob reports, skipping`);
