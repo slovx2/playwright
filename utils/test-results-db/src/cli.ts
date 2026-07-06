@@ -266,7 +266,7 @@ async function cmdDownload(): Promise<void> {
 async function cmdUpdate(args: Args): Promise<void> {
   const dest = resolveDbPath();
   const lookbackDays = num(args, 'lookback-days', 3);
-  const maxSizeMb = num(args, 'max-size-mb', 200);
+  const maxSizeMb = num(args, 'max-size-mb', 800);
   const maxRuns = num(args, 'max-runs', Infinity);
 
   // Read the dedupe set, then close the db: the merge reporter needs exclusive

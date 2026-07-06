@@ -70,7 +70,14 @@ CREATE TABLE IF NOT EXISTS ${qualifiedName} (
   pr_number INTEGER,
   bot_name VARCHAR,
   project_name VARCHAR,
-  test_id VARCHAR,
+  -- Playwright's test_id is intentionally omitted. It's a deterministic hash of
+  -- (project.id, file, full title path) — see bindFileSuiteToProject in
+  -- packages/playwright/src/common/suiteUtils.ts. Those exact inputs are already
+  -- stored verbatim as (project_name, file, test_title), so test_id carries no
+  -- identifying information the tuple doesn't. It was also the single largest
+  -- column (~44% of the file: a high-entropy 40-char SHA that compresses poorly),
+  -- so dropping it roughly halves storage. Identify a test across runs by
+  -- grouping on (project_name, file, test_title).
   test_title VARCHAR,
   file VARCHAR,
   line INTEGER,

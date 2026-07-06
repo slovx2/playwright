@@ -53,8 +53,7 @@ Single table `test_results`, one row per test result (**one row per retry**):
 | `head_sha`, `head_branch`, `pr_number` | what was tested |
 | `bot_name` | e.g. `Ubuntu chromium` — the CI bot (recovered from the merge-injected tag) |
 | `project_name` | Playwright project, e.g. `chromium`, `webkit` |
-| `test_id` | stable id of the test case |
-| `test_title` | full title path (`file > describe > test`) |
+| `test_title` | full title path (`describe > test`) |
 | `file`, `line` | source location |
 | `expected_status` | `passed` / `skipped` / ... |
 | `status` | actual result: `passed` / `failed` / `timedOut` / `skipped` / `interrupted` |
@@ -66,89 +65,13 @@ Single table `test_results`, one row per test result (**one row per retry**):
 | `ingested_at` | debug only — when this row was imported (will be dropped later) |
 
 Notes:
+- **A test is identified by `(project_name, file, test_title)`** — group on that
+  tuple. (Playwright's `test_id` hash is deliberately not stored; those three
+  columns are its pre-image, so the tuple is equivalent and far more compressible.)
 - **Flakiness is derived**, not stored — a test is flaky in a run when its
-  retries mix `failed`→`passed` (see query below).
+  retries mix `failed`→`passed`.
 - The db is size-capped: the oldest whole runs are evicted over time, so it holds
   a recent window, not full history.
-
-## Canonical queries
-
-### Flaky tests (failed then passed within the same run)
-
-```sql
-SELECT run_id, project_name, test_title,
-       count(*) FILTER (WHERE status = 'passed') AS passed,
-       count(*) FILTER (WHERE status IN ('failed', 'timedOut')) AS failed
-FROM test_results
-GROUP BY run_id, project_name, test_id, test_title
-HAVING passed > 0 AND failed > 0
-ORDER BY failed DESC
-LIMIT 50;
-```
-
-### Most-flaky tests across the retained window
-
-```sql
-SELECT project_name, test_title, count(DISTINCT run_id) AS flaky_runs
-FROM (
-  SELECT run_id, project_name, test_id, test_title
-  FROM test_results
-  GROUP BY run_id, project_name, test_id, test_title
-  HAVING count(*) FILTER (WHERE status = 'passed') > 0
-     AND count(*) FILTER (WHERE status IN ('failed', 'timedOut')) > 0
-)
-GROUP BY project_name, test_title
-ORDER BY flaky_runs DESC
-LIMIT 25;
-```
-
-### Failure rate per project (final attempt per test)
-
-```sql
-WITH final AS (
-  SELECT run_id, project_name, test_id,
-         argMax(status, retry) AS final_status
-  FROM test_results
-  GROUP BY run_id, project_name, test_id
-)
-SELECT project_name,
-       count(*) AS results,
-       count(*) FILTER (WHERE final_status IN ('failed', 'timedOut')) AS failing,
-       round(100.0 * count(*) FILTER (WHERE final_status IN ('failed', 'timedOut')) / count(*), 2) AS fail_pct
-FROM final
-GROUP BY project_name
-ORDER BY fail_pct DESC;
-```
-
-### Slowest tests
-
-```sql
-SELECT project_name, test_title, round(avg(duration_ms)) AS avg_ms, count(*) AS samples
-FROM test_results
-WHERE status = 'passed'
-GROUP BY project_name, test_title
-HAVING samples >= 3
-ORDER BY avg_ms DESC
-LIMIT 25;
-```
-
-### What failed on a specific SHA or PR
-
-```sql
-SELECT workflow_name, project_name, test_title, status, error_message, bot_name, run_id
-FROM test_results
-WHERE head_sha = '<sha>'          -- or: pr_number = <n>
-  AND status IN ('failed', 'timedOut')
-ORDER BY project_name, test_title;
-```
-
-### Tests carrying a tag
-
-```sql
-SELECT DISTINCT project_name, test_title
-FROM test_results
-WHERE tags LIKE '%@slow%';
-```
 
 ## Fetching the full blob report
 

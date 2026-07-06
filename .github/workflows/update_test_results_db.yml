@@ -52,7 +52,7 @@ jobs:
           TRDB_REPO_ROOT: ${{ github.workspace }}
           # merge-reports can be memory-hungry on large runs.
           NODE_OPTIONS: --max-old-space-size=8192
-        run: node src/cli.ts update --lookback-days 5 --max-size-mb 200
+        run: node src/cli.ts update --lookback-days 5 --max-size-mb 800
       - name: Upload database
         if: steps.ingest.outputs.imported != '0'
         uses: actions/upload-artifact@v4

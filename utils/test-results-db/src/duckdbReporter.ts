@@ -132,7 +132,7 @@ class DuckDBReporter implements Reporter {
     integer(run.prNumber);
     varchar(botName);
     varchar(projectName);
-    appender.appendVarchar(test.id);
+    // test_id intentionally not stored — see the schema comment in db.ts.
     appender.appendVarchar(title);
     appender.appendVarchar(relativeTestFile(test.location.file));
     appender.appendInteger(test.location.line);
