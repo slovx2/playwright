@@ -329,6 +329,7 @@ test(`save/load third party 'Partitioned;' cookies`, async ({ page, browserName,
 });
 
 test(`add 'Partitioned;' cookie via API`, async ({ page, context, browserName, httpsServer, isMac, webkitPartitions, isBidi, urls }) => {
+  test.fixme(browserName === 'webkit' && isMac && !webkitPartitions, 'WebKit on macOS < 26 now partitions the nested third-party cookie, contradicting the pre-26 expectation added in #41579. No issue filed yet.');
   addCommonCookieHandlers(httpsServer, urls);
 
   await context.addCookies([
