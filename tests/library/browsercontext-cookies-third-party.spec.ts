@@ -329,6 +329,7 @@ test(`save/load third party 'Partitioned;' cookies`, async ({ page, browserName,
 });
 
 test(`add 'Partitioned;' cookie via API`, async ({ page, context, browserName, httpsServer, isMac, webkitPartitions, isBidi, urls }) => {
+  test.fixme(browserName === 'webkit' && isMac && !webkitPartitions, 'WebKit on macOS < 26 partitions third-party cookies unlike Linux/Windows, so the non-partitioned expectations no longer match.');
   addCommonCookieHandlers(httpsServer, urls);
 
   await context.addCookies([
