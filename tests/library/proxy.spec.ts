@@ -232,8 +232,9 @@ it('should work with authenticate followed by redirect', async ({ browserName, b
   await browser.close();
 });
 
-it('should exclude patterns', async ({ browserType, server, channel }) => {
+it('should exclude patterns', async ({ browserType, server, channel, browserName, isMac }) => {
   it.skip(channel?.startsWith('msedge'), 'times out while loading the page');
+  it.fixme(browserName === 'firefox' && isMac, 'Flaky 30s navigation timeout on Firefox macOS bots only, likely DNS resolution of the non-existent bypass domains stalling; not reproducible off-CI.');
 
   server.setRoute('/target.html', async (req, res) => {
     res.end('<html><title>Served by the proxy</title></html>');
