@@ -235,7 +235,7 @@ it('should work with authenticate followed by redirect', async ({ browserName, b
 
 it('should exclude patterns', async ({ browserType, server, channel, browserName, isMac }) => {
   it.skip(channel?.startsWith('msedge'), 'times out while loading the page');
-  it.fixme(browserName === 'firefox' && isMac && os.arch() === 'x64', 'Flaky 30s navigation timeout on Intel macOS Firefox bots only (arm64 macOS is green); not reproducible off-CI.');
+  it.fixme(browserName === 'firefox' && isMac && os.arch() === 'x64', 'Flaky 30s navigation timeout');
 
   server.setRoute('/target.html', async (req, res) => {
     res.end('<html><title>Served by the proxy</title></html>');
