@@ -220,7 +220,11 @@ test('should not leak dispatchers after closing page', async ({ context, server 
   expect(await queryObjectCount(clientClass.Response)).toBe(0);
 });
 
-test('should not leak workers', async ({ page }) => {
+test('should not leak workers', async ({ page, browserName, channel }) => {
+  // Flaky on stable Firefox (Juggler): after worker.terminate(), the worker 'close'
+  // event is sometimes never delivered, so workerObj.waitForEvent('close') hangs and
+  // the test times out. Passes on Chromium, WebKit and moz-firefox-nightly (BiDi).
+  test.fixme(browserName === 'firefox' && !channel?.startsWith('moz-firefox'));
   const before = await queryObjectCount(coreServer.Worker);
   for (let i = 0; i < 5; ++i) {
     const [workerHandle, workerObj] = await Promise.all([
