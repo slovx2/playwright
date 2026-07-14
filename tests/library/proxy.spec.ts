@@ -232,8 +232,9 @@ it('should work with authenticate followed by redirect', async ({ browserName, b
   await browser.close();
 });
 
-it('should exclude patterns', async ({ browserType, server, channel }) => {
+it('should exclude patterns', async ({ browserType, server, channel, browserName, isMac }) => {
   it.skip(channel?.startsWith('msedge'), 'times out while loading the page');
+  it.fixme(browserName === 'firefox' && isMac, 'Times out navigating bypassed non-existent domains on Firefox/macOS CI (~35% of runs); not reproducible on other OSes or locally.');
 
   server.setRoute('/target.html', async (req, res) => {
     res.end('<html><title>Served by the proxy</title></html>');
