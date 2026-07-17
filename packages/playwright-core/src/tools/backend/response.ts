@@ -270,8 +270,13 @@ export class Response {
       addSection('Ran Playwright code', this._code, 'js');
 
     // Render tab titles upon changes or when more than one tab.
-    const tabSnapshot = this._context.currentTab() ? await this._context.currentTabOrDie().captureSnapshot(this._includeSnapshotRoot, this._includeSnapshotDepth, this._includeSnapshotBoxes, this._clientWorkspace) : undefined;
-    const tabHeaders = await Promise.all(this._context.tabs().map(tab => tab.headerSnapshot()));
+    const currentTab = this._context.currentTab();
+    const tabSnapshot = currentTab && !currentTab.page.isClosed() ? await currentTab.captureSnapshot(this._includeSnapshotRoot, this._includeSnapshotDepth, this._includeSnapshotBoxes, this._clientWorkspace) : undefined;
+    // A navigation may have closed the last tab (e.g. chrome://extensions/); the
+    // 'close' event that removes it from the tab list is async, so ignore tabs
+    // whose page has already closed to render a stable tab state.
+    const openTabs = this._context.tabs().filter(tab => !tab.page.isClosed());
+    const tabHeaders = await Promise.all(openTabs.map(tab => tab.headerSnapshot()));
     if (this._includeSnapshot !== 'none' || tabHeaders.some(header => header.changed)) {
       if (tabHeaders.length !== 1)
         addSection('Open tabs', renderTabsMarkdown(tabHeaders));

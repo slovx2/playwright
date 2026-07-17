@@ -32,9 +32,11 @@ const navigate = defineTool({
 
   handle: async (context, params, response) => {
     const tab = await context.ensureTab();
-    const url = await tab.checkUrlAndNavigate(params.url);
-
+    // Always include the snapshot, even when navigation fails: navigating to a
+    // page that closes the last tab (e.g. chrome://extensions/) rejects goto,
+    // and we still want to render the resulting tab state gracefully.
     response.setIncludeSnapshot();
+    const url = await tab.checkUrlAndNavigate(params.url);
     response.addCode(`await page.goto('${url}');`);
   },
 });
