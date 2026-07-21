@@ -617,7 +617,16 @@ it('should not leak listeners during bad navigation', async ({ page, server }) =
 
 it('should not leak listeners during 20 waitForNavigation', async ({ page, server }) => {
   let warning = null;
-  const warningHandler = w => warning = w;
+  // This test guards against Playwright leaking listeners on its own EventEmitters.
+  // `process.on('warning')` is process-global though, so it also observes warnings
+  // from unrelated async work in the worker. Playwright attaches no abort listeners
+  // in this path (no AbortSignal is passed), so a `MaxListenersExceededWarning` about
+  // a bare AbortSignal/EventTarget comes from elsewhere and must not fail this test.
+  const warningHandler = w => {
+    if (w.name === 'MaxListenersExceededWarning' && /AbortSignal|EventTarget/.test(w.message))
+      return;
+    warning = w;
+  };
   process.on('warning', warningHandler);
   const promises = [...Array(20)].map(() => page.waitForNavigation());
   await page.goto(server.EMPTY_PAGE);
