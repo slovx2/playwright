@@ -56,13 +56,23 @@ export const test = baseTest.extend<{
   },
   connectToDashboard: async ({ cli, playwright }, use) => {
     await use(async (bindTitle: string) => {
+      // Launching the dashboard app (a full Chromium) inside the daemon is expensive and, under
+      // parallel CI load, its cold-start can blow past the default test budget before it registers.
+      // Every test using this fixture shares that cost, so grant the extra budget centrally.
+      const testInfo = test.info();
+      if (testInfo.timeout)
+        testInfo.setTimeout(Math.max(testInfo.timeout, 90_000));
       let endpoint = '';
+      // Poll on a fixed 1s cadence rather than back-to-back: each `cli list` cold-starts a
+      // fresh node process, and hammering it storms the CPU exactly while the dashboard app
+      // Chromium is trying to launch and bind, starving the very thing we are waiting for.
       await expect(async () => {
         const { output } = await cli('list', '--all', '--json');
         const { servers } = JSON.parse(output);
         const server = servers.find(s => s.title === bindTitle);
+        expect(server, `dashboard app "${bindTitle}" is not registered yet`).toBeTruthy();
         endpoint = server.endpoint;
-      }).toPass();
+      }).toPass({ intervals: [1000] });
       return await playwright.chromium.connect(endpoint);
     });
     await cli('show', '--kill');
