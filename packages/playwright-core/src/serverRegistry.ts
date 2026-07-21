@@ -220,25 +220,44 @@ class ServerRegistry extends EventEmitter {
   }
 }
 
+// A single connection probe is not authoritative: under load a live endpoint can
+// transiently refuse or reset a connection (listen backlog exhaustion, the daemon
+// mid-cold-start, etc). Since `list()` unlinks descriptors that fail to connect,
+// one such blip would permanently evict a healthy registration. Retry a few times
+// with a short per-attempt timeout before declaring the endpoint dead — a truly
+// gone endpoint keeps failing fast, while a busy one recovers.
+const kConnectProbeAttempts = 5;
+const kConnectProbeTimeout = 1000;
+const kConnectProbeInterval = 100;
+
 async function canConnectTo(descriptor: BrowserDescriptor): Promise<boolean> {
-  if (!descriptor.endpoint)
+  const endpoint = descriptor.endpoint ?? (descriptor as any).pipeName;
+  if (!endpoint)
     return false;
-  if (descriptor.endpoint.startsWith('ws://') || descriptor.endpoint.startsWith('wss://')) {
-    return await new Promise(resolve => {
-      const url = new URL(descriptor.endpoint!);
-      const socket = net.createConnection(Number(url.port), url.hostname, () => {
-        socket.destroy();
-        resolve(true);
-      });
-      socket.on('error', () => resolve(false));
-    });
+  for (let attempt = 0; attempt < kConnectProbeAttempts; ++attempt) {
+    if (await attemptConnectTo(endpoint))
+      return true;
+    if (attempt < kConnectProbeAttempts - 1)
+      await new Promise(resolve => setTimeout(resolve, kConnectProbeInterval));
   }
-  return await new Promise(resolve => {
-    const socket = net.createConnection(descriptor.endpoint ?? (descriptor as any).pipeName, () => {
+  return false;
+}
+
+function attemptConnectTo(endpoint: string): Promise<boolean> {
+  return new Promise(resolve => {
+    let socket: net.Socket;
+    const done = (result: boolean) => {
       socket.destroy();
-      resolve(true);
-    });
-    socket.on('error', () => resolve(false));
+      resolve(result);
+    };
+    if (endpoint.startsWith('ws://') || endpoint.startsWith('wss://')) {
+      const url = new URL(endpoint);
+      socket = net.createConnection(Number(url.port), url.hostname, () => done(true));
+    } else {
+      socket = net.createConnection(endpoint, () => done(true));
+    }
+    socket.setTimeout(kConnectProbeTimeout, () => done(false));
+    socket.on('error', () => done(false));
   });
 }
 
