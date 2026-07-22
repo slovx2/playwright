@@ -8,6 +8,8 @@ const repositoryRoot = resolve(import.meta.dirname, '../..');
 const extensionRoot = join(repositoryRoot, 'packages/extension/dist');
 const coreArtifact = join(outputRoot, 'playwright-core.tgz');
 const extensionArtifact = join(outputRoot, 'tyrs-browser-extension.zip');
+const revision = run('git', ['rev-parse', 'HEAD'], repositoryRoot).trim();
+const dirty = Boolean(run('git', ['status', '--porcelain'], repositoryRoot).trim());
 
 await rm(outputRoot, { recursive: true, force: true });
 await mkdir(outputRoot, { recursive: true });
@@ -19,8 +21,6 @@ await copyFile(localCoreArtifact, coreArtifact);
 await rm(localCoreArtifact);
 run('zip', ['-q', '-r', extensionArtifact, '.'], extensionRoot);
 
-const revision = run('git', ['rev-parse', 'HEAD'], repositoryRoot).trim();
-const dirty = Boolean(run('git', ['status', '--porcelain'], repositoryRoot).trim());
 const extensionManifest = JSON.parse(await readFile(join(extensionRoot, 'manifest.json'), 'utf8'));
 const corePackage = JSON.parse(await readFile(join(repositoryRoot, 'packages/playwright-core/package.json'), 'utf8'));
 const artifacts = [extensionArtifact, coreArtifact];
