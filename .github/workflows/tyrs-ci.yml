@@ -19,9 +19,9 @@ jobs:
           node-version: 24.14.0
           cache: npm
       - run: npm ci
-      - name: Test extension and Core
-        run: |
-          npm run test-extension
-          npm run tsc -- --pretty false
+      - name: Test extension
+        run: npm run test-extension
       - name: Build release candidates
         run: npm run build-tyrs-artifacts -- out/tyrs-browser
+      - name: Type-check generated Core sources
+        run: npm run tsc -- --pretty false

@@ -19,12 +19,12 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Test Tyrs extension and Core
-        run: |
-          npm run test-extension
-          npm run tsc -- --pretty false
+      - name: Test Tyrs extension
+        run: npm run test-extension
       - name: Build extension and Playwright Core artifacts
         run: npm run build-tyrs-artifacts -- out/tyrs-browser
+      - name: Type-check generated Core sources
+        run: npm run tsc -- --pretty false
       - name: Package signed CRX
         env:
           EXTENSION_SIGNING_KEY_B64: ${{ secrets.TYRS_BROWSER_EXTENSION_SIGNING_KEY_B64 }}
