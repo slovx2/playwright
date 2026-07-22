@@ -1,0 +1,8 @@
+{
+  "type": "object",
+  "properties": {
+    "relayUrl": { "type": "string" },
+    "statusUrl": { "type": "string" },
+    "extensionToken": { "type": "string" }
+  }
+}

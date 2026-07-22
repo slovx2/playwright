@@ -1,153 +1,154 @@
 /**
  * Copyright (c) Microsoft Corporation.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Licensed under the Apache License, Version 2.0.
  */
 
-import { debugLog } from './relayConnection';
-import { PendingConnections } from './pendingConnection';
-import { ConnectedTabGroup, cleanupStalePlaywrightGroups, isNonDebuggableUrl } from './connectedTabGroup';
+import { ProfileConnection, isDebuggable } from './profileConnection';
+import { RelayConnection } from './relayConnection';
 
-type PageMessage = {
-  type: 'connectionRequested';
-  mcpRelayUrl: string;
-  protocolVersion: number;
-} | {
-  type: 'getTabs';
-} | {
-  type: 'connectToTab';
-  // Picked in the connect page; absent on the token-bypass path where no tab
-  // selection happens.
-  tab?: chrome.tabs.Tab;
-  clientName?: string;
-} | {
-  type: 'getConnectionStatus';
-} | {
-  type: 'disconnect';
-} | {
-  type: 'keepalive';
+const reconnectDelayMs = 5_000;
+const heartbeatIntervalMs = 30_000;
+
+type ExtensionConfiguration = {
+  relayUrl: string;
+  statusUrl: string;
+  extensionToken: string;
 };
 
-class PlaywrightExtension {
-  private _activeGroup: ConnectedTabGroup | undefined;
-  private _activeClientName: string | undefined;
-  private _pendingConnections = new PendingConnections();
-  // Service worker restarts lose all connection state, so any existing
-  // Playwright groups are stale. Connections wait on this before reconciling.
-  private _cleanupPromise: Promise<void>;
+class TyrsBrowserExtension {
+  private _profile?: ProfileConnection;
+  private _socket?: WebSocket;
+  private _heartbeat?: number;
+  private _reconnect?: number;
+  private _connectedAt?: string;
 
   constructor() {
-    chrome.runtime.onMessage.addListener(this._onMessage.bind(this));
-    chrome.action.onClicked.addListener(this._onActionClicked.bind(this));
-    this._cleanupPromise = cleanupStalePlaywrightGroups();
+    chrome.runtime.onInstalled.addListener(() => void this._connect());
+    chrome.runtime.onStartup.addListener(() => void this._connect());
+    chrome.storage.onChanged.addListener(() => this._restart());
+    void this._connect();
   }
 
-  // Promise-based message handling is not supported in Chrome: https://issues.chromium.org/issues/40753031
-  private _onMessage(message: PageMessage, sender: chrome.runtime.MessageSender, sendResponse: (response: any) => void) {
-    switch (message.type) {
-      case 'connectionRequested':
-        this._pendingConnections.create(sender.tab!.id!, message.mcpRelayUrl, message.protocolVersion).then(
-            () => sendResponse({ success: true }),
-            (error: any) => sendResponse({ success: false, error: error.message }));
-        return true;
-      case 'getTabs':
-        this._getTabs().then(
-            tabs => sendResponse({ success: true, tabs, currentTabId: sender.tab?.id }),
-            (error: any) => sendResponse({ success: false, error: error.message }));
-        return true;
-      case 'connectToTab': {
-        // Token-bypass (no specific pick) falls back to the connect page itself
-        // so `ConnectedTabGroup` always has a concrete tab to start from. Both
-        // sender.tab and UI-supplied tabs come from chrome.tabs.query / runtime
-        // message sender, where `id` is always defined.
-        const selectedTab = (message.tab ?? sender.tab!) as chrome.tabs.Tab & { id: number };
-        this._connectTab(sender.tab!.id!, selectedTab, message.clientName).then(
-            () => sendResponse({ success: true }),
-            (error: any) => sendResponse({ success: false, error: error.message }));
-        return true; // Return true to indicate that the response will be sent asynchronously
-      }
-      case 'getConnectionStatus':
-        sendResponse({
-          connectedTabIds: this._activeGroup?.connectedTabIds() ?? [],
-          clientName: this._activeClientName,
-        });
-        return false;
-      case 'disconnect':
-        try {
-          this._disconnect('User disconnected');
-          sendResponse({ success: true });
-        } catch (error: any) {
-          sendResponse({ success: false, error: error.message });
-        }
-        return true;
-      case 'keepalive':
-        // Connect page pings us every ~20s so receiving this message resets
-        // the MV3 service worker idle timer and keeps the relay WebSocket alive.
-        return false;
+  private async _connect(): Promise<void> {
+    this._clearTimers();
+    const configuration = await loadConfiguration();
+    if (!configuration) {
+      await this._setBadge('!', '#B45309', 'Tyrs Browser Bridge is not configured');
+      this._scheduleReconnect();
+      return;
     }
+    const relay = new URL(configuration.relayUrl);
+    relay.searchParams.set('token', configuration.extensionToken);
+    const socket = new WebSocket(relay);
+    this._socket = socket;
+    socket.onopen = () => void this._onOpen(socket, configuration);
+    socket.onclose = () => this._onDisconnect(socket);
+    socket.onerror = () => this._onDisconnect(socket);
   }
 
-  private async _connectTab(selectorTabId: number, tab: chrome.tabs.Tab & { id: number }, clientName: string | undefined): Promise<void> {
+  private async _onOpen(socket: WebSocket, configuration: ExtensionConfiguration): Promise<void> {
+    if (socket !== this._socket)
+      return socket.close();
+    this._connectedAt = new Date().toISOString();
+    const relay = new RelayConnection(socket);
+    const profile = new ProfileConnection(relay);
+    profile.onclose = () => this._onDisconnect(socket);
+    this._profile = profile;
     try {
-      await this._cleanupPromise;
-      this._disconnect('Another connection is requested');
-
-      const connection = await this._pendingConnections.take(selectorTabId);
-      if (!connection)
-        throw new Error('Pending client connection closed');
-
-      const group = new ConnectedTabGroup(connection, tab);
-      group.onclose = () => {
-        if (this._activeGroup === group) {
-          this._activeGroup = undefined;
-          this._activeClientName = undefined;
-        }
-      };
-      this._activeGroup = group;
-      this._activeClientName = clientName;
-
-      await Promise.all([
-        chrome.tabs.update(tab.id, { active: true }),
-        chrome.windows.update(tab.windowId, { focused: true }),
-      ]).catch(() => {});
-
-      if (tab.id !== selectorTabId)
-        await chrome.tabs.remove(selectorTabId).catch(() => {});
-    } catch (error: any) {
-      debugLog(`Failed to connect tab ${tab.id}:`, error.message);
-      throw error;
+      await profile.initialize();
+      await this._setBadge('ON', '#15803D', 'Tyrs Browser Bridge connected');
+      await this._sendStatus(configuration, true);
+      this._heartbeat = setInterval(() => {
+        if (socket.readyState === WebSocket.OPEN)
+          socket.send(JSON.stringify({ method: 'tyrs.heartbeat', params: [] }));
+        void this._sendStatus(configuration, socket.readyState === WebSocket.OPEN);
+      }, heartbeatIntervalMs);
+    } catch {
+      socket.close(1011, 'Failed to initialize Chrome profile');
     }
   }
 
-  private async _getTabs(): Promise<chrome.tabs.Tab[]> {
-    const tabs = await chrome.tabs.query({});
-    return tabs.filter(tab => !isNonDebuggableUrl(tab.url));
+  private _onDisconnect(socket: WebSocket): void {
+    if (socket !== this._socket)
+      return;
+    this._clearTimers();
+    this._profile?.close();
+    this._profile = undefined;
+    this._socket = undefined;
+    this._connectedAt = undefined;
+    void this._setBadge('OFF', '#B91C1C', 'Tyrs Browser Bridge disconnected');
+    this._scheduleReconnect();
   }
 
-  private async _onActionClicked(): Promise<void> {
-    await chrome.tabs.create({
-      url: chrome.runtime.getURL('status.html'),
-      active: true
-    });
+  private _restart(): void {
+    this._socket?.close(1000, 'Configuration changed');
+    if (!this._socket)
+      void this._connect();
   }
 
-  // Closes the active group's connection if any. ConnectedTabGroup's onclose
-  // handles state cleanup (connectedTabIds, badges, reconcile).
-  private _disconnect(reason: string) {
-    this._activeGroup?.close(reason);
-    this._activeGroup = undefined;
-    this._activeClientName = undefined;
+  private _scheduleReconnect(): void {
+    if (this._reconnect === undefined)
+      this._reconnect = setTimeout(() => void this._connect(), reconnectDelayMs);
+  }
+
+  private _clearTimers(): void {
+    if (this._heartbeat !== undefined)
+      clearInterval(this._heartbeat);
+    if (this._reconnect !== undefined)
+      clearTimeout(this._reconnect);
+    this._heartbeat = undefined;
+    this._reconnect = undefined;
+  }
+
+  private async _sendStatus(configuration: ExtensionConfiguration, connected: boolean): Promise<void> {
+    const tabs = (await chrome.tabs.query({})).filter(isDebuggable);
+    await fetch(configuration.statusUrl, {
+      method: 'POST',
+      headers: {
+        'authorization': `Bearer ${configuration.extensionToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        connected,
+        profile: 'current',
+        tabCount: tabs.length,
+        extensionVersion: chrome.runtime.getManifest().version,
+        chromeVersion: navigator.userAgent,
+        connectedAt: this._connectedAt,
+      }),
+    }).catch(() => undefined);
+  }
+
+  private async _setBadge(text: string, color: string, title: string): Promise<void> {
+    await Promise.all([
+      chrome.action.setBadgeText({ text }),
+      chrome.action.setBadgeBackgroundColor({ color }),
+      chrome.action.setTitle({ title }),
+    ]);
   }
 }
 
-new PlaywrightExtension();
+async function loadConfiguration(): Promise<ExtensionConfiguration | undefined> {
+  const [managed, local] = await Promise.all([
+    chrome.storage.managed.get().catch(() => ({})),
+    chrome.storage.local.get(),
+  ]);
+  const values = { ...local, ...managed } as Partial<ExtensionConfiguration>;
+  if (!values.relayUrl || !values.statusUrl || !values.extensionToken)
+    return undefined;
+  const relay = new URL(values.relayUrl);
+  const status = new URL(values.statusUrl);
+  if (!isLoopback(relay.hostname) || !isLoopback(status.hostname))
+    return undefined;
+  if (relay.protocol !== 'ws:' && relay.protocol !== 'wss:')
+    return undefined;
+  if (status.protocol !== 'http:' && status.protocol !== 'https:')
+    return undefined;
+  return values as ExtensionConfiguration;
+}
+
+function isLoopback(hostname: string): boolean {
+  return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '[::1]';
+}
+
+new TyrsBrowserExtension();

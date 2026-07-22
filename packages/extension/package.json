@@ -1,18 +1,18 @@
 {
   "name": "@playwright/extension",
   "version": "0.2.1",
-  "description": "Playwright Browser Extension",
+  "description": "Tyrs Browser Extension",
   "private": true,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/microsoft/playwright.git"
+    "url": "git+https://github.com/slovx2/playwright.git"
   },
-  "homepage": "https://playwright.dev",
+  "homepage": "https://github.com/slovx2/playwright/tree/main/packages/extension",
   "engines": {
     "node": ">=20"
   },
   "author": {
-    "name": "Microsoft Corporation"
+    "name": "Tyrs Hand contributors"
   },
   "license": "Apache-2.0"
 }

@@ -1,228 +1,143 @@
 /**
  * Copyright (c) Microsoft Corporation.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Licensed under the Apache License, Version 2.0.
  */
 
-export function debugLog(...args: unknown[]): void {
-  const enabled = true;
-  if (enabled) {
-    // eslint-disable-next-line no-console
-    console.log('[Extension]', ...args);
-  }
-}
+import { ProtocolCommand, ProtocolV2Handler, RelayContext, resolveChromeMember } from './protocolHandlers';
 
-import {
-  ProtocolCommand, ProtocolHandler, ProtocolV1Handler, ProtocolV2Handler,
-  RelayContext, resolveChromeMember,
-} from './protocolHandlers';
-
-type ProtocolResponse = {
-  id?: number;
-  method?: string;
-  params?: any;
-  result?: any;
-  error?: string;
-};
-
-// chrome.* events the extension forwards to the relay (positional params).
-const CHROME_EVENT_METHODS = [
+const chromeEventMethods = [
   'chrome.debugger.onEvent',
   'chrome.debugger.onDetach',
   'chrome.tabs.onCreated',
   'chrome.tabs.onRemoved',
 ];
 
+type ProtocolResponse = {
+  id?: number;
+  result?: unknown;
+  error?: string | { code: number, message: string };
+};
+
 export class RelayConnection {
-  private _ws: WebSocket;
-  private _handler: ProtocolHandler;
-  // Tabs whose debugger we have explicitly attached for this connection.
-  private _attachedTabs = new Set<number>();
-  // Once we've attached at least one tab, detaching the last one closes the connection.
-  private _hasEverAttached = false;
-  private _eventListeners: Array<{ remove: () => void }> = [];
+  private readonly _handler: ProtocolV2Handler;
+  private readonly _attached = new Set<number>();
+  private readonly _eventListeners: Array<() => void> = [];
   private _closed = false;
 
   onclose?: () => void;
   ontabattached?: (tabId: number) => void;
   ontabdetached?: (tabId: number) => void;
 
-  get attachedTabs(): ReadonlySet<number> {
-    return this._attachedTabs;
-  }
-
-  constructor(ws: WebSocket, protocolVersion: number) {
-    this._ws = ws;
+  constructor(private readonly _socket: WebSocket) {
     const context: RelayContext = {
-      attachedTabs: this._attachedTabs,
-      sendMessage: msg => this._sendMessage(msg),
-      notifyTabAttached: tabId => this._notifyTabAttached(tabId),
-      notifyTabDetached: tabId => this._notifyTabDetached(tabId),
+      attachedTabs: this._attached,
+      sendMessage: message => this._send(message),
+      notifyTabAttached: tabId => this._notifyAttached(tabId),
+      notifyTabDetached: tabId => this._notifyDetached(tabId),
     };
-    this._handler = protocolVersion === 1
-      ? new ProtocolV1Handler(context)
-      : new ProtocolV2Handler(context);
+    this._handler = new ProtocolV2Handler(context);
     this._installEventForwarders();
-    this._ws.onmessage = this._onMessage.bind(this);
-    this._ws.onclose = () => this._onClose();
+    _socket.onmessage = event => void this._onMessage(event);
+    _socket.onclose = () => this._handleClose();
+    _socket.onerror = () => this._handleClose();
   }
 
-  // Signals the end of the initial-tab handshake — call after the initial
-  // round of `attachTab` invocations. For v2 this sends `extension.initialized`
-  // so the relay can unblock Playwright CDP traffic; v1 has no handshake.
+  get attachedTabs(): ReadonlySet<number> {
+    return this._attached;
+  }
+
+  attachTab(tab: chrome.tabs.Tab): void {
+    if (!this._closed && tab.id !== undefined && !this._attached.has(tab.id))
+      this._handler.onUserAttachRequest(tab);
+  }
+
+  detachTab(tabId: number): void {
+    if (this._closed || !this._attached.has(tabId))
+      return;
+    void chrome.debugger.detach({ tabId }).catch(() => undefined);
+    this._notifyDetached(tabId);
+    this._handler.onUserDetachRequest(tabId);
+  }
+
   didInitialize(): void {
     this._handler.didInitialize();
   }
 
-  close(message: string): void {
-    this._ws.close(1000, message);
-    // ws.onclose is called asynchronously, so we call it here to avoid forwarding
-    // CDP events to the closed connection.
-    this._onClose();
+  close(reason: string): void {
+    if (this._socket.readyState === WebSocket.OPEN)
+      this._socket.close(1000, reason);
+    this._handleClose();
   }
 
-  // Called when the UI adds a tab to the Playwright group. The handler asks
-  // the relay to attach; the normal command path fires ontabattached.
-  attachTab(tab: chrome.tabs.Tab): void {
-    if (this._closed || this._attachedTabs.has(tab.id!))
-      return;
-    this._handler.onUserAttachRequest(tab);
-  }
-
-  // Called when the UI removes a tab from the Playwright group. We detach the
-  // debugger and update bookkeeping; the handler emits the wire-level detach
-  // notification for protocols that have one.
-  detachTab(tabId: number): void {
-    if (this._closed || !this._attachedTabs.has(tabId))
-      return;
-    chrome.debugger.detach({ tabId }).catch(error => {
-      debugLog('Error detaching tab:', error);
-    });
-    this._notifyTabDetached(tabId);
-    this._handler.onUserDetachRequest(tabId);
-    this._checkLastTabDetached();
-  }
-
-  private _notifyTabAttached(tabId: number): void {
-    this._attachedTabs.add(tabId);
-    this._hasEverAttached = true;
+  private _notifyAttached(tabId: number): void {
+    this._attached.add(tabId);
     this.ontabattached?.(tabId);
   }
 
-  private _notifyTabDetached(tabId: number): void {
-    this._attachedTabs.delete(tabId);
+  private _notifyDetached(tabId: number): void {
+    this._attached.delete(tabId);
     this.ontabdetached?.(tabId);
   }
 
   private _installEventForwarders(): void {
-    for (const fullMethod of CHROME_EVENT_METHODS) {
+    for (const fullMethod of chromeEventMethods) {
       const target = resolveChromeMember(fullMethod);
-      const listener = (...args: any[]) => this._onChromeEvent(fullMethod, args);
+      const listener = (...args: unknown[]) => this._onChromeEvent(fullMethod, args);
       target.obj[target.name].addListener(listener);
-      this._eventListeners.push({
-        remove: () => target.obj[target.name].removeListener(listener),
-      });
+      this._eventListeners.push(() => target.obj[target.name].removeListener(listener));
     }
   }
 
-  private _onClose() {
+  private _onChromeEvent(fullMethod: string, args: unknown[]): void {
+    const tabId = tabIDForEvent(fullMethod, args);
+    if (tabId === undefined || !this._attached.has(tabId))
+      return;
+    this._handler.forwardChromeEvent(fullMethod, args);
+    if (fullMethod === 'chrome.debugger.onDetach')
+      this._notifyDetached(tabId);
+  }
+
+  private async _onMessage(event: MessageEvent): Promise<void> {
+    let command: ProtocolCommand;
+    try {
+      command = JSON.parse(String(event.data)) as ProtocolCommand;
+    } catch (error) {
+      this._send({ error: { code: -32700, message: String(error) } });
+      return;
+    }
+    const response: ProtocolResponse = { id: command.id };
+    try {
+      response.result = await this._handler.handleCommand(command);
+    } catch (error) {
+      response.error = error instanceof Error ? error.message : String(error);
+    }
+    this._send(response);
+  }
+
+  private _send(message: unknown): void {
+    if (this._socket.readyState === WebSocket.OPEN)
+      this._socket.send(JSON.stringify(message));
+  }
+
+  private _handleClose(): void {
     if (this._closed)
       return;
     this._closed = true;
-    for (const l of this._eventListeners)
-      l.remove();
-    this._eventListeners = [];
-    for (const tabId of [...this._attachedTabs]) {
-      chrome.debugger.detach({ tabId }).catch(() => {});
-      this._notifyTabDetached(tabId);
+    this._eventListeners.splice(0).forEach(remove => remove());
+    for (const tabId of [...this._attached]) {
+      void chrome.debugger.detach({ tabId }).catch(() => undefined);
+      this._notifyDetached(tabId);
     }
     this.onclose?.();
   }
+}
 
-  private _checkLastTabDetached(): void {
-    if (this._hasEverAttached && this._attachedTabs.size === 0)
-      this.close('All controlled tabs detached');
-  }
-
-  // Filters chrome.* events to attached tabs, delegates wire formatting to the
-  // handler, then runs shared detach bookkeeping.
-  private _onChromeEvent(fullMethod: string, args: any[]): void {
-    const tabId = this._tabIdForEventArgs(fullMethod, args);
-    if (tabId === undefined || !this._attachedTabs.has(tabId))
-      return;
-    this._handler.forwardChromeEvent(fullMethod, args);
-    // chrome.debugger.onDetach is the single source of truth for detach bookkeeping.
-    if (fullMethod === 'chrome.debugger.onDetach') {
-      this._notifyTabDetached(tabId);
-      this._checkLastTabDetached();
-    }
-  }
-
-  // Returns the tabId an event refers to, for filtering by _attachedTabs.
-  private _tabIdForEventArgs(fullMethod: string, args: any[]): number | undefined {
-    switch (fullMethod) {
-      case 'chrome.debugger.onEvent':
-      case 'chrome.debugger.onDetach':
-        return (args[0] as chrome.debugger.Debuggee | undefined)?.tabId;
-      case 'chrome.tabs.onCreated': {
-        const tab = args[0] as chrome.tabs.Tab;
-        // Forward only popups opened by an attached tab; report the opener so cdpRelay
-        // can filter / decide. We use the openerTabId for the attached-tab check.
-        return tab.openerTabId;
-      }
-      case 'chrome.tabs.onRemoved':
-        return args[0] as number;
-    }
-    return undefined;
-  }
-
-  private _onMessage(event: MessageEvent): void {
-    this._onMessageAsync(event).catch(e => debugLog('Error handling message:', e));
-  }
-
-  private async _onMessageAsync(event: MessageEvent): Promise<void> {
-    let message: ProtocolCommand;
-    try {
-      message = JSON.parse(event.data);
-    } catch (error: any) {
-      debugLog(`Error parsing message ${event.data}:`, error);
-      this._sendError(-32700, `Error parsing message: ${error.message}`);
-      return;
-    }
-
-    const response: ProtocolResponse = {
-      id: message.id,
-    };
-    try {
-      response.result = await this._handler.handleCommand(message);
-    } catch (error: any) {
-      debugLog(`Error handling command ${JSON.stringify(message)}:`, error);
-      response.error = error.message;
-    }
-    this._sendMessage(response);
-  }
-
-  private _sendError(code: number, message: string): void {
-    this._sendMessage({
-      error: {
-        code,
-        message,
-      },
-    });
-  }
-
-  private _sendMessage(message: any): void {
-    if (this._ws.readyState === WebSocket.OPEN)
-      this._ws.send(JSON.stringify(message));
-  }
+function tabIDForEvent(fullMethod: string, args: unknown[]): number | undefined {
+  if (fullMethod === 'chrome.debugger.onEvent' || fullMethod === 'chrome.debugger.onDetach')
+    return (args[0] as chrome.debugger.Debuggee | undefined)?.tabId;
+  if (fullMethod === 'chrome.tabs.onCreated')
+    return (args[0] as chrome.tabs.Tab | undefined)?.openerTabId;
+  if (fullMethod === 'chrome.tabs.onRemoved')
+    return args[0] as number;
+  return undefined;
 }

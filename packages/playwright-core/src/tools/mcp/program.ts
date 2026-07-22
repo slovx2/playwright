@@ -100,8 +100,52 @@ export function decorateMCPCommand(command: Command) {
         const tools = filteredTools(config);
         const useSharedBrowser = config.sharedBrowserContext || config.browser.isolated;
         let sharedBrowserPromise: Promise<playwright.Browser> | undefined;
+        let sharedBrowserGeneration = 0;
+        let prewarmTimer: NodeJS.Timeout | undefined;
         let clientCount = 0;
         const clientNameCounters = new Map<string, number>();
+        const prewarmClient = { clientName: 'Tyrs Browser Bridge', cwd: process.cwd() };
+
+        const ensureSharedBrowser = (clientInfo: ClientInfo): Promise<playwright.Browser> => {
+          if (!sharedBrowserPromise) {
+            const generation = ++sharedBrowserGeneration;
+            const promise = (async () => {
+              const { browser, canBind } = await createBrowserWithInfo(config, clientInfo, options);
+              if (canBind)
+                await browser.bind(clientInfo.clientName, { workspaceDir: clientInfo.cwd });
+              browser.on('disconnected', () => {
+                if (generation !== sharedBrowserGeneration)
+                  return;
+                sharedBrowserPromise = undefined;
+                if (config.sharedBrowserContext)
+                  schedulePrewarm(0);
+              });
+              return browser;
+            })().catch(error => {
+              if (generation === sharedBrowserGeneration)
+                sharedBrowserPromise = undefined;
+              throw error;
+            });
+            sharedBrowserPromise = promise;
+          }
+          return sharedBrowserPromise;
+        };
+
+        const logPrewarmError = (error: unknown): void => {
+          testDebug(`failed to prewarm shared browser: ${error}`);
+        };
+
+        const schedulePrewarm = (delay = 5_000): void => {
+          if (prewarmTimer)
+            return;
+          prewarmTimer = setTimeout(() => {
+            prewarmTimer = undefined;
+            void ensureSharedBrowser(prewarmClient).catch(error => {
+              logPrewarmError(error);
+              schedulePrewarm();
+            });
+          }, delay);
+        };
 
         const factory: mcpServer.ServerBackendFactory = {
           name: 'Playwright',
@@ -109,17 +153,8 @@ export function decorateMCPCommand(command: Command) {
           version,
           toolSchemas: tools.map(tool => tool.schema),
           create: async (clientInfo: ClientInfo) => {
-            if (useSharedBrowser && !sharedBrowserPromise) {
-              sharedBrowserPromise = (async () => {
-                const { browser, canBind } = await createBrowserWithInfo(config, clientInfo, options);
-                if (canBind)
-                  await browser.bind(clientInfo.clientName, { workspaceDir: clientInfo.cwd });
-                return browser;
-              })().catch(error => {
-                sharedBrowserPromise = undefined;
-                throw error;
-              });
-            }
+            if (useSharedBrowser)
+              ensureSharedBrowser(clientInfo);
             clientCount++;
             const { browser, canBind } = sharedBrowserPromise ? { browser: await sharedBrowserPromise, canBind: false } : await createBrowserWithInfo(config, clientInfo, options);
             if (canBind) {
@@ -135,7 +170,7 @@ export function decorateMCPCommand(command: Command) {
             clientCount--;
             const browserContext = (backend as BrowserBackend).browserContext;
 
-            if (sharedBrowserPromise && clientCount > 0) {
+            if (sharedBrowserPromise && (config.sharedBrowserContext || clientCount > 0)) {
               if (config.browser.isolated) {
                 testDebug('close context');
                 await browserContext.close().catch(() => { });
@@ -149,6 +184,8 @@ export function decorateMCPCommand(command: Command) {
             await browserContext.browser()?.close().catch(() => { });
           }
         };
+        if (config.sharedBrowserContext)
+          schedulePrewarm(0);
         await mcpServer.start(factory, config.server);
       });
 }
