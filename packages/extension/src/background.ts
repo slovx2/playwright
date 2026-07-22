@@ -5,15 +5,10 @@
 
 import { ProfileConnection, isDebuggable } from './profileConnection';
 import { RelayConnection } from './relayConnection';
+import { ExtensionConfiguration, loadConfiguration } from './configuration';
 
 const reconnectDelayMs = 5_000;
 const heartbeatIntervalMs = 30_000;
-
-type ExtensionConfiguration = {
-  relayUrl: string;
-  statusUrl: string;
-  extensionToken: string;
-};
 
 class TyrsBrowserExtension {
   private _profile?: ProfileConnection;
@@ -126,29 +121,6 @@ class TyrsBrowserExtension {
       chrome.action.setTitle({ title }),
     ]);
   }
-}
-
-async function loadConfiguration(): Promise<ExtensionConfiguration | undefined> {
-  const [managed, local] = await Promise.all([
-    chrome.storage.managed.get().catch(() => ({})),
-    chrome.storage.local.get(),
-  ]);
-  const values = { ...local, ...managed } as Partial<ExtensionConfiguration>;
-  if (!values.relayUrl || !values.statusUrl || !values.extensionToken)
-    return undefined;
-  const relay = new URL(values.relayUrl);
-  const status = new URL(values.statusUrl);
-  if (!isLoopback(relay.hostname) || !isLoopback(status.hostname))
-    return undefined;
-  if (relay.protocol !== 'ws:' && relay.protocol !== 'wss:')
-    return undefined;
-  if (status.protocol !== 'http:' && status.protocol !== 'https:')
-    return undefined;
-  return values as ExtensionConfiguration;
-}
-
-function isLoopback(hostname: string): boolean {
-  return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '[::1]';
 }
 
 new TyrsBrowserExtension();

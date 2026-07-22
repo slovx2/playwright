@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Tyrs Browser Extension",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Connects the current Chrome profile to the local Tyrs Browser Bridge.",
   "permissions": [
     "debugger",
