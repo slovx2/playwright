@@ -17,6 +17,7 @@ class TyrsBrowserExtension {
   private _reconnect?: number;
   private _connectedAt?: string;
   private _configuration?: ExtensionConfiguration;
+  private _connecting?: Promise<void>;
 
   constructor() {
     chrome.runtime.onInstalled.addListener(() => void this._connect());
@@ -25,7 +26,15 @@ class TyrsBrowserExtension {
     void this._connect();
   }
 
-  private async _connect(): Promise<void> {
+  private _connect(): Promise<void> {
+    if (this._socket)
+      return Promise.resolve();
+    if (!this._connecting)
+      this._connecting = this._connectOnce().finally(() => this._connecting = undefined);
+    return this._connecting;
+  }
+
+  private async _connectOnce(): Promise<void> {
     this._clearTimers();
     const configuration = await loadConfiguration();
     if (!configuration) {
@@ -53,8 +62,8 @@ class TyrsBrowserExtension {
     this._profile = profile;
     try {
       await profile.initialize();
-      await this._setBadge('ON', '#15803D', 'Tyrs Browser Bridge connected');
       await this._sendStatus(configuration, true);
+      await this._setBadge('ON', '#15803D', 'Tyrs Browser Bridge connected');
       this._heartbeat = setInterval(() => {
         if (socket.readyState === WebSocket.OPEN)
           socket.send(JSON.stringify({ method: 'tyrs.heartbeat', params: [] }));
