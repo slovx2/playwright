@@ -24,6 +24,8 @@ let debuggerEvent: ReturnType<typeof eventMock>;
 let debuggerDetach: ReturnType<typeof eventMock>;
 let tabCreated: ReturnType<typeof eventMock>;
 let tabRemoved: ReturnType<typeof eventMock>;
+let downloadCreated: ReturnType<typeof eventMock>;
+let downloadChanged: ReturnType<typeof eventMock>;
 let detach: ReturnType<typeof spy>;
 let sent: string[];
 let socket: any;
@@ -33,11 +35,14 @@ beforeEach(() => {
   debuggerDetach = eventMock();
   tabCreated = eventMock();
   tabRemoved = eventMock();
+  downloadCreated = eventMock();
+  downloadChanged = eventMock();
   detach = spy();
   Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: { OPEN: 1 } });
   globalThis.chrome = {
     debugger: { attach: spy(), detach, sendCommand: spy({}), onEvent: debuggerEvent, onDetach: debuggerDetach },
     tabs: { create: spy({}), remove: spy(), onCreated: tabCreated, onRemoved: tabRemoved },
+    downloads: { search: spy([]), onCreated: downloadCreated, onChanged: downloadChanged },
   } as unknown as typeof chrome;
   sent = [];
   socket = { readyState: 1, send: (value: string) => sent.push(value), close: spy() };
@@ -56,7 +61,9 @@ test('deduplicates attachment, filters unrelated events, and detaches all tabs o
   assert.equal(sent.length, 3, 'acknowledged tab is not announced again');
   debuggerEvent.emit({ tabId: 99 }, 'Page.loadEventFired', {});
   debuggerEvent.emit({ tabId: 7 }, 'Page.loadEventFired', {});
+  downloadCreated.emit({ id: 5, url: 'https://example.com/file' });
   assert.equal(sent.filter(value => JSON.parse(value).method === 'chrome.debugger.onEvent').length, 1);
+  assert.equal(sent.filter(value => JSON.parse(value).method === 'chrome.downloads.onCreated').length, 1);
 
   socket.onclose();
   await nextTurn();

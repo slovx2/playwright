@@ -22,6 +22,7 @@ const allowedChromeCommands = new Set([
   'chrome.debugger.sendCommand',
   'chrome.tabs.create',
   'chrome.tabs.remove',
+  'chrome.downloads.search',
 ]);
 
 export class ProtocolV2Handler {

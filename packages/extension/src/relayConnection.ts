@@ -10,6 +10,8 @@ const chromeEventMethods = [
   'chrome.debugger.onDetach',
   'chrome.tabs.onCreated',
   'chrome.tabs.onRemoved',
+  'chrome.downloads.onCreated',
+  'chrome.downloads.onChanged',
 ];
 
 type ProtocolResponse = {
@@ -89,6 +91,10 @@ export class RelayConnection {
   }
 
   private _onChromeEvent(fullMethod: string, args: unknown[]): void {
+    if (fullMethod.startsWith('chrome.downloads.')) {
+      this._handler.forwardChromeEvent(fullMethod, args);
+      return;
+    }
     const tabId = tabIDForEvent(fullMethod, args);
     if (tabId === undefined || !this._attached.has(tabId))
       return;

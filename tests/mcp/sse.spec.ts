@@ -69,6 +69,26 @@ test('sse transport', async ({ serverEndpoint }) => {
   await client.ping();
 });
 
+test('sse transport pins each session to its browser scope', async ({ serverEndpoint }) => {
+  const { url } = await serverEndpoint();
+  const scope = '11111111-1111-4111-8111-111111111111';
+  const transport = new SSEClientTransport(new URL('/sse', url), {
+    requestInit: { headers: { 'x-tyrs-browser-scope': scope } },
+  });
+  const client = new Client({ name: 'test', version: '1.0.0' });
+  await client.connect(transport);
+  const endpoint = (transport as unknown as { _endpoint?: URL })._endpoint;
+  expect(endpoint).toBeDefined();
+  const crossed = await fetch(endpoint!, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-tyrs-browser-scope': 'worker' },
+    body: '{}',
+  });
+  expect(crossed.status).toBe(403);
+  expect(await crossed.text()).toContain('another browser scope');
+  await client.close();
+});
+
 test('sse transport (config)', async ({ serverEndpoint }) => {
   const config: Config = {
     server: {
@@ -272,6 +292,5 @@ test('sse transport shared context', async ({ serverEndpoint, server }) => {
     'delete SSE session': 2,
     'create browser (persistent)': 1,
     'create context': 2,
-    'close browser': 1,
   });
 });

@@ -20,13 +20,18 @@ import { commaSeparatedList, dotenvFileLoader, enumParser, headerParser, numberP
 import { setupExitWatchdog } from './watchdog';
 import { createBrowserWithInfo } from './browserFactory';
 import { BrowserBackend } from '../backend/browserBackend';
+import { browserSelectSchema, RoutingBrowserBackend } from '../backend/routingBrowserBackend';
 import { filteredTools } from '../backend/tools';
 import { testDebug } from './log';
 import { packageJSON } from '../../package';
+import { BrowserAgentRegistry } from './browserAgentRegistry';
+import { playwright as inProcessPlaywright } from '../../inprocess';
 
 import type { Command } from 'commander';
 import type { ClientInfo } from '../utils/mcp/server';
 import type * as playwright from '../../..';
+import type { FullConfig } from './config';
+import type { Tool } from '../backend/tool';
 
 const version = packageJSON.version;
 
@@ -98,13 +103,18 @@ export function decorateMCPCommand(command: Command) {
 
         const config = await resolveCLIConfigForMCP(options);
         const tools = filteredTools(config);
+        const browserAgentRegistry = await BrowserAgentRegistry.startFromEnv();
+        if (browserAgentRegistry) {
+          await startRoutingServer(config, options, tools, browserAgentRegistry);
+          return;
+        }
         const useSharedBrowser = config.sharedBrowserContext || config.browser.isolated;
         let sharedBrowserPromise: Promise<playwright.Browser> | undefined;
         let sharedBrowserGeneration = 0;
         let prewarmTimer: NodeJS.Timeout | undefined;
         let clientCount = 0;
         const clientNameCounters = new Map<string, number>();
-        const prewarmClient = { clientName: 'Tyrs Browser Bridge', cwd: process.cwd() };
+        const prewarmClient = { clientName: 'Tyrs Browser Bridge', cwd: process.cwd(), scope: 'worker' };
 
         const ensureSharedBrowser = (clientInfo: ClientInfo): Promise<playwright.Browser> => {
           if (!sharedBrowserPromise) {
@@ -188,4 +198,80 @@ export function decorateMCPCommand(command: Command) {
           schedulePrewarm(0);
         await mcpServer.start(factory, config.server);
       });
+}
+
+async function startRoutingServer(config: FullConfig, options: any, tools: Tool[], registry: BrowserAgentRegistry): Promise<void> {
+  let workerPromise: Promise<playwright.Browser> | undefined;
+  let workerReady = false;
+  const desktopBrowsers = new Map<string, Promise<playwright.Browser>>();
+
+  const ensureWorker = (clientInfo: ClientInfo): Promise<playwright.Browser> => {
+    if (!workerPromise) {
+      workerPromise = createBrowserWithInfo(config, clientInfo, options).then(async ({ browser, canBind }) => {
+        if (canBind)
+          await browser.bind(clientInfo.clientName, { workspaceDir: clientInfo.cwd });
+        workerReady = true;
+        browser.on('disconnected', () => {
+          workerReady = false;
+          workerPromise = undefined;
+        });
+        return browser;
+      }).catch(error => {
+        workerReady = false;
+        workerPromise = undefined;
+        throw error;
+      });
+    }
+    return workerPromise;
+  };
+
+  const ensureDesktop = (scope: string): Promise<playwright.Browser> => {
+    let promise = desktopBrowsers.get(scope);
+    if (!promise) {
+      promise = inProcessPlaywright.chromium.connectOverCDP(registry.cdpEndpoint(scope), { isLocal: false, timeout: 0 }).then(browser => {
+        browser.on('disconnected', () => desktopBrowsers.delete(scope));
+        return browser;
+      }).catch(error => {
+        desktopBrowsers.delete(scope);
+        throw error;
+      });
+      desktopBrowsers.set(scope, promise);
+    }
+    return promise;
+  };
+
+  registry.onGenerationChanged(scope => {
+    desktopBrowsers.delete(scope);
+  });
+
+  const prewarmClient: ClientInfo = { clientName: 'Tyrs Browser Bridge', cwd: process.cwd(), scope: 'worker' };
+  void ensureWorker(prewarmClient).catch(error => testDebug(`failed to prewarm worker browser: ${error}`));
+
+  const factory: mcpServer.ServerBackendFactory = {
+    name: 'Playwright',
+    nameInConfig: 'playwright',
+    version,
+    toolSchemas: [browserSelectSchema, ...tools.map(tool => tool.schema)],
+    create: async (clientInfo: ClientInfo) => new RoutingBrowserBackend({
+      worker: async () => createBackend(config, tools, await ensureWorker(clientInfo)),
+      desktop: async () => {
+        if (clientInfo.scope === 'worker')
+          throw new Error('worker scope 不能访问桌面端浏览器');
+        return createBackend(config, tools, await ensureDesktop(clientInfo.scope));
+      },
+    }, {
+      worker: () => ({ available: workerReady || Boolean(workerPromise), label: 'worker 浏览器' }),
+      desktop: () => ({ label: '桌面端浏览器', ...registry.status(clientInfo.scope) }),
+    }),
+    disposed: async () => {},
+    health: () => registry.health(),
+  };
+  await mcpServer.start(factory, config.server);
+}
+
+function createBackend(config: FullConfig, tools: Tool[], browser: playwright.Browser): BrowserBackend {
+  const browserContext = browser.contexts()[0];
+  if (!browserContext)
+    throw new Error('浏览器没有可用的上下文');
+  return new BrowserBackend(config, browserContext, tools);
 }

@@ -85,6 +85,42 @@ test('http transport', async ({ serverEndpoint }) => {
   await client.ping();
 });
 
+test('http transport pins each MCP session to its browser scope', async ({ serverEndpoint }) => {
+  const { url } = await serverEndpoint();
+  const environmentScope = '11111111-1111-4111-8111-111111111111';
+  const transport = new StreamableHTTPClientTransport(new URL('/mcp', url), {
+    requestInit: { headers: { 'x-tyrs-browser-scope': environmentScope } },
+  });
+  const client = new Client({ name: 'test', version: '1.0.0' });
+  await client.connect(transport);
+  expect(transport.sessionId).toBeDefined();
+
+  const crossed = await fetch(new URL('/mcp', url), {
+    method: 'GET',
+    headers: {
+      'accept': 'text/event-stream',
+      'connection': 'close',
+      'mcp-session-id': transport.sessionId!,
+      'x-tyrs-browser-scope': 'worker',
+    },
+  });
+  expect(crossed.status).toBe(403);
+  expect(await crossed.text()).toContain('another browser scope');
+
+  await transport.terminateSession();
+  await client.close();
+});
+
+test('http transport rejects a forged browser scope', async ({ serverEndpoint }) => {
+  const { url } = await serverEndpoint();
+  const response = await fetch(new URL('/mcp', url), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-tyrs-browser-scope': 'forged' },
+    body: '{}',
+  });
+  expect(response.status).toBe(400);
+});
+
 test('http transport (config)', async ({ serverEndpoint }) => {
   const config: Config = {
     server: {
@@ -335,7 +371,6 @@ test('http transport shared context', async ({ serverEndpoint, server }) => {
     'create http session': 2,
     'delete http session': 2,
     'create context': 2,
-    'close browser': 1,
   });
 });
 

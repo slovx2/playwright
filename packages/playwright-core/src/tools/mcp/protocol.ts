@@ -46,6 +46,20 @@ export type Tab = {
   pinned: boolean;
 };
 export type TabRemoveInfo = { windowId: number; isWindowClosing: boolean };
+export type DownloadItem = {
+  id: number;
+  url: string;
+  finalUrl?: string;
+  filename: string;
+  state: string;
+  fileSize: number;
+  startTime: string;
+};
+export type DownloadDelta = {
+  id: number;
+  state?: { current?: string, previous?: string };
+  filename?: { current?: string, previous?: string };
+};
 
 // Protocol v2: command params/results mirror chrome.* positional arguments,
 // so the extension can spread them straight into chrome.<api>.<method>(...).
@@ -75,6 +89,10 @@ export type ExtensionCommandV2 = {
     params: [tabIds: number | number[]];
     result: void;
   };
+  'chrome.downloads.search': {
+    params: [query: { id?: number, url?: string, state?: string }];
+    result: DownloadItem[];
+  };
 };
 
 // Protocol v2 events mirror chrome.<api>.<event>.addListener callback signatures.
@@ -94,6 +112,12 @@ export type ExtensionEventsV2 = {
   // chrome.tabs.onRemoved: (tabId, removeInfo) => void
   'chrome.tabs.onRemoved': {
     params: [tabId: number, removeInfo: TabRemoveInfo];
+  };
+  'chrome.downloads.onCreated': {
+    params: [item: DownloadItem];
+  };
+  'chrome.downloads.onChanged': {
+    params: [delta: DownloadDelta];
   };
   // Playwright-specific: signals end of the initial tab handshake. The relay
   // withholds Playwright-side CDP messages until this event arrives, so that

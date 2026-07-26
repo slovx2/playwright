@@ -17,6 +17,8 @@
 export { setupExitWatchdog } from './mcp/watchdog';
 
 export { BrowserBackend } from './backend/browserBackend';
+export { CDPRelayServer } from './mcp/cdpRelay';
+export { browserAgentPreface, browserAgentMaxChunkSize, browserAgentMaxFileSize, encodeBrowserAgentFrame } from './mcp/browserAgentProtocol';
 export { parseResponse } from './backend/response';
 export { Tab } from './backend/tab';
 export { browserTools, filteredTools } from './backend/tools';

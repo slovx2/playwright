@@ -16,6 +16,7 @@ class TyrsBrowserExtension {
   private _heartbeat?: number;
   private _reconnect?: number;
   private _connectedAt?: string;
+  private _configuration?: ExtensionConfiguration;
 
   constructor() {
     chrome.runtime.onInstalled.addListener(() => void this._connect());
@@ -32,6 +33,7 @@ class TyrsBrowserExtension {
       this._scheduleReconnect();
       return;
     }
+    this._configuration = configuration;
     const relay = new URL(configuration.relayUrl);
     relay.searchParams.set('token', configuration.extensionToken);
     const socket = new WebSocket(relay);
@@ -71,6 +73,8 @@ class TyrsBrowserExtension {
     this._profile = undefined;
     this._socket = undefined;
     this._connectedAt = undefined;
+    if (this._configuration)
+      void this._sendStatus(this._configuration, false);
     void this._setBadge('OFF', '#B91C1C', 'Tyrs Browser Bridge disconnected');
     this._scheduleReconnect();
   }

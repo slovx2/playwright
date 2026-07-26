@@ -52,6 +52,11 @@ type CDPCommand = {
 
 type CDPResponse = CDPMessage;
 
+export interface CDPRelayDelegate {
+  onExtensionEvent?(method: keyof ExtensionEventsV2, params: any): void;
+  onCDPMessage?(message: CDPResponse, forward: (message: CDPResponse) => void): void | Promise<void>;
+}
+
 export class CDPRelayServer {
   private _wsHost: string;
   private _cdpPath: string;
@@ -62,6 +67,7 @@ export class CDPRelayServer {
   private _protocolVersion: number;
   private _handler: ExtensionProtocolV2;
   private _extensionConnectionPromise = new ManualPromise<void>();
+  private _delegate?: CDPRelayDelegate;
 
   constructor(server: http.Server, _browserChannel: string, _executablePath?: string) {
     this._wsHost = addressToString(server.address(), { protocol: 'ws' });
@@ -89,6 +95,16 @@ export class CDPRelayServer {
 
   extensionEndpoint() {
     return `${this._wsHost}${this._extensionPath}`;
+  }
+
+  setDelegate(delegate: CDPRelayDelegate): void {
+    this._delegate = delegate;
+  }
+
+  async queryDownloads(id: number): Promise<protocol.DownloadItem[]> {
+    if (!this._extensionConnection)
+      throw new Error('Extension not connected');
+    return await this._extensionConnection.send('chrome.downloads.search', [{ id }]);
   }
 
   async establishExtensionConnection(_clientName: string) {
@@ -181,7 +197,10 @@ export class CDPRelayServer {
       this._handler.onExtensionDisconnect(reason);
       this._closeCDPConnection(`Extension disconnected: ${reason}`);
     };
-    this._extensionConnection.onmessage = (method, params) => this._handler.handleExtensionEvent(method, params);
+    this._extensionConnection.onmessage = (method, params) => {
+      this._delegate?.onExtensionEvent?.(method, params);
+      this._handler.handleExtensionEvent(method, params);
+    };
     this._extensionConnectionPromise.resolve();
   }
 
@@ -222,7 +241,15 @@ export class CDPRelayServer {
 
   private _sendToCDPClient(message: CDPResponse): void {
     debugLogger('→ Playwright:', `${message.method ?? `response(id=${message.id})`}`);
-    this._cdpConnection?.send(JSON.stringify(message));
+    const forward = (value: CDPResponse) => this._cdpConnection?.send(JSON.stringify(value));
+    if (this._delegate?.onCDPMessage) {
+      void Promise.resolve(this._delegate.onCDPMessage(message, forward)).catch(error => {
+        debugLogger('CDP relay delegate failed:', error);
+        this._closeCDPConnection('CDP relay delegate failed');
+      });
+      return;
+    }
+    forward(message);
   }
 }
 
