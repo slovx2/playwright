@@ -54,6 +54,7 @@ type CDPResponse = CDPMessage;
 
 export interface CDPRelayDelegate {
   onExtensionEvent?(method: keyof ExtensionEventsV2, params: any): void;
+  onExtensionDisconnected?(reason: string): void;
   onCDPMessage?(message: CDPResponse, forward: (message: CDPResponse) => void): void | Promise<void>;
   onCDPTiming?(method: string, durationMs: number): void;
 }
@@ -201,6 +202,15 @@ export class CDPRelayServer {
       ws.close(4001, 'Unauthorized extension connection');
       return;
     }
+    const expectedVersion = process.env.PLAYWRIGHT_MCP_EXTENSION_VERSION;
+    const expectedCapabilityVersion = process.env.PLAYWRIGHT_MCP_EXTENSION_CAPABILITY_VERSION;
+    if ((expectedVersion && requestURL.searchParams.get('extensionVersion') !== expectedVersion) ||
+        (expectedCapabilityVersion && requestURL.searchParams.get('capabilityVersion') !== expectedCapabilityVersion) ||
+        ((expectedVersion || expectedCapabilityVersion) &&
+          requestURL.searchParams.get('extensionProtocol') !== String(this._protocolVersion))) {
+      ws.close(4002, 'Incompatible extension connection');
+      return;
+    }
     if (this._extensionConnection) {
       ws.close(1000, 'Another extension connection already established');
       return;
@@ -211,6 +221,7 @@ export class CDPRelayServer {
       this._extensionConnection = null;
       this._handler.onExtensionDisconnect(reason);
       this._closeCDPConnection(`Extension disconnected: ${reason}`);
+      this._delegate?.onExtensionDisconnected?.(reason);
     };
     this._extensionConnection.onmessage = (method, params) => {
       this._delegate?.onExtensionEvent?.(method, params);
@@ -353,10 +364,11 @@ class ExtensionConnection {
     }
   }
 
-  private _onClose(event: websocket.CloseEvent) {
-    debugLogger(`<ws closed> code=${event.code} reason=${event.reason}`);
+  private _onClose(code: number, reason: Buffer) {
+    const message = reason.toString();
+    debugLogger(`<ws closed> code=${code} reason=${message}`);
     this._dispose();
-    this.onclose?.(event.reason);
+    this.onclose?.(message);
   }
 
   private _onError(event: websocket.ErrorEvent) {

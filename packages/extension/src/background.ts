@@ -6,6 +6,11 @@
 import { ProfileConnection, isDebuggable } from './profileConnection';
 import { RelayConnection } from './relayConnection';
 import { ExtensionConfiguration, loadConfiguration } from './configuration';
+import {
+  authenticatedRelayURL,
+  extensionCapabilityVersion,
+  extensionProtocolVersion,
+} from './connectionMetadata';
 
 const reconnectDelayMs = 2_000;
 const reconnectAlarmDelayMinutes = 0.5;
@@ -72,8 +77,10 @@ class TyrsBrowserExtension {
       this._scheduleReconnect();
       return;
     }
-    const relay = new URL(configuration.relayUrl);
-    relay.searchParams.set('token', configuration.extensionToken);
+    const relay = authenticatedRelayURL(
+        configuration.relayUrl,
+        configuration.extensionToken,
+        chrome.runtime.getManifest().version);
     const socket = new WebSocket(relay);
     this._socket = socket;
     socket.onopen = () => void this._onOpen(socket, configuration);
@@ -178,7 +185,8 @@ class TyrsBrowserExtension {
         profile: 'current',
         tabCount: tabs.length,
         extensionVersion: chrome.runtime.getManifest().version,
-        extensionProtocol: 2,
+        extensionProtocol: extensionProtocolVersion,
+        capabilityVersion: extensionCapabilityVersion,
         chromeVersion: navigator.userAgent,
         connectedAt: this._connectedAt,
       }),
