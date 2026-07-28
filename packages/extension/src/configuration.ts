@@ -22,7 +22,11 @@ export async function loadConfiguration(
   if (stored)
     return stored;
   try {
-    const response = await fetcher(bootstrapURL, { cache: 'no-store', credentials: 'omit' });
+    const bootstrap = new URL(bootstrapURL);
+    const extensionId = globalThis.chrome?.runtime?.id;
+    if (extensionId)
+      bootstrap.searchParams.set('extensionId', extensionId);
+    const response = await fetcher(bootstrap.href, { cache: 'no-store', credentials: 'omit' });
     if (!response.ok)
       return undefined;
     return validateConfiguration(await response.json());

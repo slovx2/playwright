@@ -18,6 +18,54 @@ import fs from 'fs/promises';
 import { pathToFileURL } from 'url';
 import { test, expect } from './fixtures';
 
+test.use({ mcpArgs: ['--snapshot-mode=full'] });
+
+test('action responses omit snapshots by default and explicit snapshots remain available', async ({ startClient, server }) => {
+  const { client } = await startClient({ omitArgs: ['--snapshot-mode=full'] });
+  const navigation = await client.callTool({
+    name: 'browser_navigate',
+    arguments: { url: server.HELLO_WORLD },
+  });
+  expect(navigation).toHaveResponse({ snapshot: undefined });
+  const snapshot = await client.callTool({ name: 'browser_snapshot', arguments: {} });
+  expect(snapshot).toHaveResponse({
+    inlineSnapshot: expect.stringContaining('Hello, world!'),
+  });
+});
+
+test('browser_batch runs structured actions, keeps explicit observations, and blocks javascript URLs', async ({ startClient, server }) => {
+  server.setContent('/batch', `
+    <input aria-label="Name">
+    <button onclick="document.querySelector('output').textContent = document.querySelector('input').value">Submit</button>
+    <output></output>
+  `, 'text/html');
+  const { client } = await startClient({ omitArgs: ['--snapshot-mode=full'] });
+  const result = await client.callTool({
+    name: 'browser_batch',
+    arguments: {
+      actions: [
+        { name: 'browser_navigate', arguments: { url: `${server.PREFIX}/batch` } },
+        { name: 'browser_snapshot', arguments: {} },
+        { name: 'browser_type', arguments: { element: 'Name', target: 'e2', text: 'Tyrs' } },
+        { name: 'browser_click', arguments: { element: 'Submit', target: 'e3' } },
+        { name: 'browser_wait_for', arguments: { text: 'Tyrs' } },
+        { name: 'browser_snapshot', arguments: {} },
+      ],
+    },
+  });
+  expect(result.isError).toBeFalsy();
+  const text = result.content.find(item => item.type === 'text')?.text || '';
+  expect(text).toContain('"completed": 6');
+  expect(text).toContain('Tyrs');
+
+  const rejected = await client.callTool({
+    name: 'browser_batch',
+    arguments: { actions: [{ name: 'browser_navigate', arguments: { url: 'javascript:alert(1)' } }] },
+  });
+  expect(rejected.isError).toBeTruthy();
+  expect(rejected.content.find(item => item.type === 'text')?.text).toContain('javascript: URLs are not allowed');
+});
+
 test('browser_navigate', async ({ client, server }) => {
   expect(await client.callTool({
     name: 'browser_navigate',

@@ -7,7 +7,9 @@ import { EventEmitter } from 'events';
 
 import type net from 'net';
 
-export const browserAgentPreface = 'TYRS-BROWSER/1\n';
+export const browserAgentProtocolVersion = 2;
+export const browserAgentCapabilityVersion = 1;
+export const browserAgentPreface = `TYRS-BROWSER/${browserAgentProtocolVersion}\n`;
 export const browserAgentMaxFrameSize = 64 * 1024 * 1024;
 export const browserAgentMaxFileSize = 25 * 1024 * 1024;
 export const browserAgentMaxChunkSize = 1024 * 1024;

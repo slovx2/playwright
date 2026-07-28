@@ -7,8 +7,6 @@ import crypto from 'crypto';
 import fs from 'fs';
 import net from 'net';
 
-import WebSocket from 'ws';
-
 import { test, expect } from './fixtures';
 import { BrowserAgentRegistry, verifyScopedToken } from '../../packages/playwright-core/src/tools/mcp/browserAgentRegistry';
 import { browserAgentPreface, encodeBrowserAgentFrame } from '../../packages/playwright-core/src/tools/mcp/browserAgentProtocol';
@@ -23,51 +21,131 @@ test('Browser Agent registry verifies scoped tokens and atomically receives desk
   expect(verifyScopedToken(secret, 'registry-secret')).toBeUndefined();
 
   const port = await freePort();
-  const registry = new BrowserAgentRegistry(secret);
+  const versions = { bridgeVersion: '0.3.0', agentVersion: '0.2.0', extensionVersion: '0.3.0' };
+  const registry = new BrowserAgentRegistry(secret, versions);
   await registry.start('127.0.0.1', port);
   const wire = await AgentWire.connect(port, token);
-  let cdp: WebSocket | undefined;
   let replacement: AgentWire | undefined;
   try {
-    await wire.send({ type: 'hello', protocol: 1, agentVersion: '0.1.0' });
+    await wire.send({ type: 'hello', protocol: 2, capabilityVersion: 1,
+      bridgeVersion: versions.bridgeVersion, agentVersion: versions.agentVersion,
+      capabilities: ['local-tool-execution', 'cancellation', 'sessions', 'artifacts'] });
     expect((await wire.next('welcome')).maxFileBytes).toBe(25 * 1024 * 1024);
     await wire.send({ type: 'status', connected: true, tabCount: 3,
-      agentVersion: '0.1.0', extensionVersion: '0.2.0', chromeVersion: 'Chrome/150' });
+      agentVersion: versions.agentVersion, extensionVersion: versions.extensionVersion,
+      extensionProtocol: 2, chromeVersion: 'Chrome/150' });
     await expect.poll(() => registry.status(scope).available).toBe(true);
     expect(registry.health()).toEqual({ connectedEnvironments: 1, availableEnvironments: 1 });
     expect(registry.status('22222222-2222-4222-8222-222222222222').available).toBe(false);
-    expect(() => registry.cdpEndpoint('22222222-2222-4222-8222-222222222222')).toThrow('桌面端浏览器不可用');
-
-    const firstEndpoint = registry.cdpEndpoint(scope);
-    cdp = new WebSocket(firstEndpoint);
-    await new Promise<void>((resolve, reject) => cdp!.once('open', resolve).once('error', reject));
-    const opened = await wire.next('cdp_open');
     const downloadsPath = testInfo.outputPath('downloads');
-    cdp.send(JSON.stringify({ id: 1, method: 'Browser.setDownloadBehavior',
-      params: { behavior: 'allow', downloadPath: downloadsPath } }));
-    expect((await wire.next('cdp_message')).streamId).toBe(opened.streamId);
+    expect(() => registry.createBackend('22222222-2222-4222-8222-222222222222')).toThrow('桌面端浏览器不可用');
+    const backend = registry.createBackend(scope);
+    await backend.initialize?.({ clientName: 'registry test', cwd: downloadsPath, scope });
+    const opened = await wire.next('session_open');
+
+    const toolResult = backend.callTool('browser_navigate', { url: 'https://example.test' }, new AbortController().signal);
+    const call = await wire.next('tool_call');
+    expect(call).toMatchObject({ sessionId: opened.sessionId, name: 'browser_navigate',
+      arguments: { url: 'https://example.test' } });
+    await wire.send({ type: 'tool_result', sessionId: call.sessionId, requestId: call.requestId,
+      result: { content: [{ type: 'text', text: 'ok' }] } });
+    expect(await toolResult).toMatchObject({
+      content: [{ type: 'text', text: 'ok' }],
+      _meta: { tyrsDesktopTiming: { bridgeRoundTripMs: expect.any(Number) } },
+    });
+
+    const controller = new AbortController();
+    const cancelled = backend.callTool('browser_click', { target: 'e1' }, controller.signal);
+    const cancelledCall = await wire.next('tool_call');
+    controller.abort(new Error('test cancellation'));
+    await expect(cancelled).rejects.toThrow('test cancellation');
+    expect((await wire.next('tool_cancel')).requestId).toBe(cancelledCall.requestId);
+    await wire.send({ type: 'tool_result', sessionId: cancelledCall.sessionId,
+      requestId: cancelledCall.requestId, result: { content: [{ type: 'text', text: 'late' }] } });
 
     const data = Buffer.from('desktop download');
     const transferId = 'transfer_1';
     const guid = 'download_guid';
-    await wire.send({ type: 'download_begin', transferId, guid, size: data.length });
+    await wire.send({ type: 'download_begin', sessionId: opened.sessionId, transferId, guid, size: data.length });
     await wire.send({ type: 'download_chunk', transferId, data: data.toString('base64') });
     await wire.send({ type: 'download_end', transferId,
       sha256: crypto.createHash('sha256').update(data).digest('hex') });
     expect(await wire.next('download_ack')).toMatchObject({ transferId, guid });
     expect(await fs.promises.readFile(`${downloadsPath}/${guid}`, 'utf8')).toBe('desktop download');
     expect((await fs.promises.readdir(downloadsPath)).filter(name => name.includes('.partial-'))).toEqual([]);
+    await backend.dispose?.();
+    expect((await wire.next('session_finalize')).sessionId).toBe(opened.sessionId);
 
     replacement = await AgentWire.connect(port, token);
     await wire.closed;
-    await replacement.send({ type: 'hello', protocol: 1, agentVersion: '0.1.0' });
+    await replacement.send({ type: 'hello', protocol: 2, capabilityVersion: 1,
+      bridgeVersion: versions.bridgeVersion, agentVersion: versions.agentVersion,
+      capabilities: ['local-tool-execution', 'cancellation', 'sessions', 'artifacts'] });
     await replacement.next('welcome');
-    await replacement.send({ type: 'status', connected: true, agentVersion: '0.1.0' });
+    await replacement.send({ type: 'status', connected: true, agentVersion: versions.agentVersion,
+      extensionVersion: versions.extensionVersion, extensionProtocol: 2 });
     await expect.poll(() => registry.status(scope).available).toBe(true);
-    expect(registry.cdpEndpoint(scope)).not.toBe(firstEndpoint);
+    expect(registry.createBackend(scope)).toBeTruthy();
   } finally {
-    cdp?.close();
     replacement?.close();
+    wire.close();
+    await registry.close();
+  }
+});
+
+test('Browser Agent registry reassembles tool artifacts and discards late transfers', async ({}, testInfo) => {
+  const secret = Buffer.from('registry-artifact-secret');
+  const token = scopedToken(secret, scope);
+  const port = await freePort();
+  const versions = { bridgeVersion: '0.3.0', agentVersion: '0.2.0', extensionVersion: '0.3.0' };
+  const registry = new BrowserAgentRegistry(secret, versions);
+  await registry.start('127.0.0.1', port);
+  const wire = await AgentWire.connect(port, token);
+  try {
+    await wire.send({ type: 'hello', protocol: 2, capabilityVersion: 1,
+      bridgeVersion: versions.bridgeVersion, agentVersion: versions.agentVersion,
+      capabilities: ['local-tool-execution', 'cancellation', 'sessions', 'artifacts'] });
+    await wire.next('welcome');
+    await wire.send({ type: 'status', connected: true, agentVersion: versions.agentVersion,
+      extensionVersion: versions.extensionVersion, extensionProtocol: 2 });
+    await expect.poll(() => registry.status(scope).available).toBe(true);
+
+    const backend = registry.createBackend(scope);
+    await backend.initialize?.({ clientName: 'artifact test', cwd: testInfo.outputPath('workspace'), scope });
+    const session = await wire.next('session_open');
+    const resultPromise = backend.callTool('browser_snapshot', {});
+    const call = await wire.next('tool_call');
+    const transferId = crypto.randomUUID();
+    const snapshot = Buffer.from('### Snapshot\n```yaml\n- button "Continue"\n```');
+    await wire.send({ type: 'artifact_begin', sessionId: session.sessionId,
+      requestId: call.requestId, transferId, contentType: 'text',
+      mimeType: 'text/plain; charset=utf-8', size: snapshot.length });
+    await wire.send({ type: 'artifact_chunk', transferId, data: snapshot.toString('base64') });
+    await wire.send({ type: 'artifact_end', transferId,
+      sha256: crypto.createHash('sha256').update(snapshot).digest('hex') });
+    expect((await wire.next('artifact_ack')).transferId).toBe(transferId);
+    await wire.send({ type: 'tool_result', sessionId: session.sessionId,
+      requestId: call.requestId, result: { content: [{ type: 'tyrs_artifact', transferId }] } });
+    expect((await resultPromise).content).toEqual([{ type: 'text', text: snapshot.toString() }]);
+
+    const controller = new AbortController();
+    const cancelled = backend.callTool('browser_snapshot', {}, controller.signal);
+    const cancelledCall = await wire.next('tool_call');
+    controller.abort(new Error('cancel test'));
+    await expect(cancelled).rejects.toThrow('cancel test');
+    await wire.next('tool_cancel');
+    const lateTransferId = crypto.randomUUID();
+    await wire.send({ type: 'artifact_begin', sessionId: session.sessionId,
+      requestId: cancelledCall.requestId, transferId: lateTransferId, contentType: 'text',
+      mimeType: 'text/plain; charset=utf-8', size: snapshot.length });
+    await wire.send({ type: 'artifact_chunk', transferId: lateTransferId, data: snapshot.toString('base64') });
+    await wire.send({ type: 'artifact_end', transferId: lateTransferId,
+      sha256: crypto.createHash('sha256').update(snapshot).digest('hex') });
+    expect((await wire.next('artifact_ack')).transferId).toBe(lateTransferId);
+    expect(registry.status(scope).available).toBe(true);
+
+    await backend.dispose?.();
+  } finally {
     wire.close();
     await registry.close();
   }

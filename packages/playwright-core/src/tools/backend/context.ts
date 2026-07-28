@@ -28,6 +28,7 @@ import { playwright } from '../../inprocess';
 import { Tab } from './tab';
 
 import type * as playwrightTypes from '../../..';
+import type { TabHeader } from './tab';
 import type { SessionLog } from './sessionLog';
 import type { Disposable } from '@isomorphic/disposable';
 import type { ToolCapability } from './tool';
@@ -63,6 +64,7 @@ export type ContextConfig = {
     initPage?: string[];
   };
   skillMode?: boolean;
+  isolatedTabs?: boolean;
 };
 
 type ContextOptions = {
@@ -89,6 +91,9 @@ export type FilenameTemplate = {
 };
 
 type VideoParams = { size?: { width: number; height: number } };
+export type TabOrigin = 'agent' | 'user';
+export type TabDisposition = 'omit' | 'deliverable' | 'handoff';
+export type ManagedTabState = { origin: TabOrigin, disposition: TabDisposition };
 
 export class Context {
   readonly config: ContextConfig;
@@ -98,6 +103,10 @@ export class Context {
   private _browserContextPromise: Promise<playwrightTypes.BrowserContext> | undefined;
   private _tabs: Tab[] = [];
   private _currentTab: Tab | undefined;
+  private _tabStates = new Map<Tab, ManagedTabState>();
+  private _pageIds = new WeakMap<playwrightTypes.Page, string>();
+  private _creatingPage = false;
+  private _sessionName = '🌐 Browser task';
   private _routes: RouteEntry[] = [];
   private _video: {
     params: VideoParams;
@@ -165,8 +174,17 @@ export class Context {
 
   async newTab(): Promise<Tab> {
     const browserContext = await this.ensureBrowserContext();
-    const page = await browserContext.newPage();
+    this._creatingPage = true;
+    let page: playwrightTypes.Page;
+    try {
+      page = await browserContext.newPage();
+    } finally {
+      this._creatingPage = false;
+    }
+    if (!this._tabs.some(tab => tab.page === page))
+      this._onPageCreated(page);
     this._currentTab = this._tabs.find(t => t.page === page)!;
+    this._tabStates.set(this._currentTab, { origin: 'agent', disposition: 'omit' });
     return this._currentTab;
   }
 
@@ -174,9 +192,89 @@ export class Context {
     const tab = this._tabs[index];
     if (!tab)
       throw new Error(`Tab ${index} not found`);
+    this._currentTab = tab;
+    return tab;
+  }
+
+  async showTab(id?: string): Promise<Tab> {
+    const tab = id ? this.tabById(id) : this.currentTabOrDie();
     await tab.page.bringToFront();
     this._currentTab = tab;
     return tab;
+  }
+
+  tabById(id: string): Tab {
+    const tab = this._tabs.find(candidate => candidate.id === id);
+    if (!tab)
+      throw new Error(`Tab ${id} not found`);
+    return tab;
+  }
+
+  tabState(tab: Tab): ManagedTabState {
+    return this._tabStates.get(tab) ?? { origin: 'user', disposition: 'omit' };
+  }
+
+  async claimTab(id: string, expectedTitle: string, expectedURL: string): Promise<Tab> {
+    let tab = this._tabs.find(candidate => candidate.id === id);
+    if (!tab && this.config.isolatedTabs) {
+      const page = this._rawBrowserContext.pages().find(candidate =>
+        !this._tabs.some(existing => existing.page === candidate) && this._pageId(candidate) === id);
+      if (page) {
+        this._onPageCreated(page);
+        tab = this._tabs.find(candidate => candidate.page === page);
+      }
+    }
+    if (!tab)
+      throw new Error(`Tab ${id} not found`);
+    if (tab.page.url() !== expectedURL)
+      throw new Error('Tab URL changed after it was listed');
+    if (await tab.page.title() !== expectedTitle)
+      throw new Error('Tab title changed after it was listed');
+    this._tabStates.set(tab, { origin: 'user', disposition: 'omit' });
+    this._currentTab = tab;
+    return tab;
+  }
+
+  async availableTabs(): Promise<Array<TabHeader & { changed: boolean } & ManagedTabState>> {
+    if (!this.config.isolatedTabs)
+      return [];
+    const pages = this._rawBrowserContext.pages().filter(page =>
+      !this._tabs.some(tab => tab.page === page) && !isInternalPage(page.url()));
+    return await Promise.all(pages.map(async page => ({
+      id: this._pageId(page),
+      title: await page.title().catch(() => ''),
+      url: page.url(),
+      current: false,
+      crashed: false,
+      console: { total: 0, warnings: 0, errors: 0 },
+      changed: false,
+      origin: 'user' as const,
+      disposition: 'omit' as const,
+    })));
+  }
+
+  markTab(id: string | undefined, disposition: Exclude<TabDisposition, 'omit'>): Tab {
+    const tab = id ? this.tabById(id) : this.currentTabOrDie();
+    const state = this.tabState(tab);
+    this._tabStates.set(tab, { ...state, disposition });
+    return tab;
+  }
+
+  async finalizeTabs(): Promise<void> {
+    const toClose = this._tabs.filter(tab => {
+      const state = this.tabState(tab);
+      return state.origin === 'agent' && state.disposition === 'omit';
+    });
+    for (const tab of toClose)
+      await tab.page.close().catch(() => {});
+  }
+
+  setSessionName(name: string): void {
+    this._sessionName = name;
+  }
+
+  sessionName(): string {
+    return this._sessionName;
   }
 
   async ensureTab(): Promise<Tab> {
@@ -246,11 +344,33 @@ export class Context {
   }
 
   private _onPageCreated(page: playwrightTypes.Page) {
-    const tab = new Tab(this, page, tab => this._onPageClosed(tab));
+    if (this._tabs.some(tab => tab.page === page))
+      return;
+    const tab = new Tab(this, page, tab => this._onPageClosed(tab), this._pageId(page));
     this._tabs.push(tab);
+    this._tabStates.set(tab, { origin: 'user', disposition: 'omit' });
     if (!this._currentTab)
       this._currentTab = tab;
     this._startPageVideo(page).catch(() => {});
+  }
+
+  private async _considerPageCreated(page: playwrightTypes.Page): Promise<void> {
+    if (!this.config.isolatedTabs || this._creatingPage) {
+      this._onPageCreated(page);
+      return;
+    }
+    const opener = await page.opener().catch(() => null);
+    if (opener && this._tabs.some(tab => tab.page === opener))
+      this._onPageCreated(page);
+  }
+
+  private _pageId(page: playwrightTypes.Page): string {
+    let id: string | undefined = this._pageIds.get(page);
+    if (!id) {
+      id = crypto.randomUUID();
+      this._pageIds.set(page, id);
+    }
+    return id;
   }
 
   private _onPageClosed(tab: Tab) {
@@ -258,6 +378,7 @@ export class Context {
     if (index === -1)
       return;
     this._tabs.splice(index, 1);
+    this._tabStates.delete(tab);
 
     if (this._currentTab === tab)
       this._currentTab = this._tabs[Math.min(index, this._tabs.length - 1)];
@@ -331,9 +452,12 @@ export class Context {
     for (const initScript of this.config.browser?.initScript || [])
       this._disposables.push(await browserContext.addInitScript({ path: path.resolve(this.options.cwd, initScript) }));
 
-    for (const page of browserContext.pages())
-      this._onPageCreated(page);
-    this._disposables.push(eventsHelper.addEventListener(browserContext, 'page', page => this._onPageCreated(page)));
+    if (!this.config.isolatedTabs) {
+      for (const page of browserContext.pages())
+        this._onPageCreated(page);
+    }
+    this._disposables.push(eventsHelper.addEventListener(browserContext, 'page',
+        page => void this._considerPageCreated(page)));
 
     return browserContext;
   }
@@ -381,6 +505,10 @@ function originOrHostGlob(originOrHost: string) {
   }
   // Support for legacy host-only mode.
   return `*://${originOrHost}/**`;
+}
+
+function isInternalPage(url: string): boolean {
+  return /^(chrome|chrome-extension|devtools|edge):/i.test(url);
 }
 
 export async function workspaceFile(options: ContextOptions, fileName: string, perCallWorkspaceDir?: string): Promise<string> {

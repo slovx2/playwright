@@ -44,6 +44,12 @@ export type Tab = {
   title?: string;
   active: boolean;
   pinned: boolean;
+  tyrs?: {
+    sessionId?: string;
+    sessionName?: string;
+    origin?: 'agent' | 'user';
+    disposition?: 'omit' | 'deliverable' | 'handoff';
+  };
 };
 export type TabRemoveInfo = { windowId: number; isWindowClosing: boolean };
 export type DownloadItem = {
@@ -93,6 +99,46 @@ export type ExtensionCommandV2 = {
     params: [query: { id?: number, url?: string, state?: string }];
     result: DownloadItem[];
   };
+  'tyrs.tabs.discover': {
+    params: [];
+    result: Tab[];
+  };
+  'tyrs.tab.claim': {
+    params: [claim: { sessionId: string, tabId: number, title: string, url: string }];
+    result: void;
+  };
+  'tyrs.session.open': {
+    params: [session: { sessionId: string, name: string, bootstrapUrl: string }];
+    result: void;
+  };
+  'tyrs.session.activate': {
+    params: [session: { sessionId: string }];
+    result: void;
+  };
+  'tyrs.session.idle': {
+    params: [session: { sessionId: string }];
+    result: void;
+  };
+  'tyrs.session.name': {
+    params: [session: { sessionId: string, name: string }];
+    result: void;
+  };
+  'tyrs.session.finalize': {
+    params: [session: { sessionId: string }];
+    result: void;
+  };
+  'tyrs.sessions.reset': {
+    params: [];
+    result: void;
+  };
+  'tyrs.tab.disposition': {
+    params: [tab: { sessionId: string, tabId?: number, disposition: 'deliverable' | 'handoff' }];
+    result: void;
+  };
+  'tyrs.visibility': {
+    params: [visibility: { sessionId: string, visible: boolean }];
+    result: void;
+  };
 };
 
 // Protocol v2 events mirror chrome.<api>.<event>.addListener callback signatures.
@@ -125,6 +171,15 @@ export type ExtensionEventsV2 = {
   // rather than blocking on a user pick.
   'extension.initialized': {
     params: [];
+  };
+  'tyrs.takeover': {
+    params: [{ sessionId: string, tabId: number, kind: string }];
+  };
+  'tyrs.heartbeat': {
+    params: [{ at: number }];
+  };
+  'tyrs.heartbeat_ack': {
+    params: [{ at: number }];
   };
 };
 

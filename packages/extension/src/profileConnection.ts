@@ -32,9 +32,11 @@ export class ProfileConnection {
   }
 
   async initialize(): Promise<void> {
-    const tabs = await chrome.tabs.query({});
-    tabs.filter(isDebuggable).forEach(tab => this._connection.attachTab(tab));
     this._connection.didInitialize();
+  }
+
+  hasActiveSessions(): boolean {
+    return this._connection.hasActiveSessions();
   }
 
   close(reason?: string): void {
@@ -50,12 +52,15 @@ export class ProfileConnection {
   }
 
   private _attach(tab: chrome.tabs.Tab): void {
-    if (isDebuggable(tab))
+    if (isDebuggable(tab) && tab.openerTabId !== undefined &&
+        this._connection.attachedTabs.has(tab.openerTabId))
       this._connection.attachTab(tab);
   }
 
   private _reconcile(tab: chrome.tabs.Tab): void {
     if (tab.id === undefined)
+      return;
+    if (!this._connection.attachedTabs.has(tab.id))
       return;
     if (isDebuggable(tab))
       this._connection.attachTab(tab);

@@ -75,7 +75,7 @@ export function decorateMCPCommand(command: Command) {
       .option('--save-session', 'Whether to save the Playwright MCP session into the output directory.')
       .option('--secrets <path>', 'path to a file containing secrets in the dotenv format', dotenvFileLoader)
       .option('--shared-browser-context', 'reuse the same browser context between all connected HTTP clients.')
-      .option('--snapshot-mode <mode>', 'when taking snapshots for responses, specifies the mode to use. Can be "full" or "none". Default is "full".')
+      .option('--snapshot-mode <mode>', 'when taking snapshots for action responses, specifies the mode to use. Can be "full" or "none". Default is "none".')
       .option('--storage-state <path>', 'path to the storage state file for isolated sessions.')
       .option('--test-id-attribute <attribute>', 'specify the attribute to use for test ids, defaults to "data-testid"')
       .option('--timeout-action <timeout>', 'specify action timeout in milliseconds, defaults to 5000ms', numberParser)
@@ -203,7 +203,7 @@ export function decorateMCPCommand(command: Command) {
 async function startRoutingServer(config: FullConfig, options: any, tools: Tool[], registry: BrowserAgentRegistry): Promise<void> {
   let workerPromise: Promise<playwright.Browser> | undefined;
   let workerReady = false;
-  const desktopBrowsers = new Map<string, Promise<playwright.Browser>>();
+  let workerError = '';
 
   const ensureWorker = (clientInfo: ClientInfo): Promise<playwright.Browser> => {
     if (!workerPromise) {
@@ -211,6 +211,7 @@ async function startRoutingServer(config: FullConfig, options: any, tools: Tool[
         if (canBind)
           await browser.bind(clientInfo.clientName, { workspaceDir: clientInfo.cwd });
         workerReady = true;
+        workerError = '';
         browser.on('disconnected', () => {
           workerReady = false;
           workerPromise = undefined;
@@ -219,30 +220,12 @@ async function startRoutingServer(config: FullConfig, options: any, tools: Tool[
       }).catch(error => {
         workerReady = false;
         workerPromise = undefined;
+        workerError = error instanceof Error ? error.message : String(error);
         throw error;
       });
     }
     return workerPromise;
   };
-
-  const ensureDesktop = (scope: string): Promise<playwright.Browser> => {
-    let promise = desktopBrowsers.get(scope);
-    if (!promise) {
-      promise = inProcessPlaywright.chromium.connectOverCDP(registry.cdpEndpoint(scope), { isLocal: false, timeout: 0 }).then(browser => {
-        browser.on('disconnected', () => desktopBrowsers.delete(scope));
-        return browser;
-      }).catch(error => {
-        desktopBrowsers.delete(scope);
-        throw error;
-      });
-      desktopBrowsers.set(scope, promise);
-    }
-    return promise;
-  };
-
-  registry.onGenerationChanged(scope => {
-    desktopBrowsers.delete(scope);
-  });
 
   const prewarmClient: ClientInfo = { clientName: 'Tyrs Browser Bridge', cwd: process.cwd(), scope: 'worker' };
   void ensureWorker(prewarmClient).catch(error => testDebug(`failed to prewarm worker browser: ${error}`));
@@ -257,11 +240,28 @@ async function startRoutingServer(config: FullConfig, options: any, tools: Tool[
       desktop: async () => {
         if (clientInfo.scope === 'worker')
           throw new Error('worker scope 不能访问桌面端浏览器');
-        return createBackend(config, tools, await ensureDesktop(clientInfo.scope));
+        return registry.createBackend(clientInfo.scope);
       },
     }, {
-      worker: () => ({ available: workerReady || Boolean(workerPromise), label: 'worker 浏览器' }),
-      desktop: () => ({ label: '桌面端浏览器', ...registry.status(clientInfo.scope) }),
+      worker: () => ({
+        available: workerReady || Boolean(workerPromise),
+        label: 'Worker browser',
+        reason: workerReady || workerPromise ? undefined :
+          `Worker browser 进程不可用${workerError ? `：${workerError}` : ''}`,
+        version,
+        capabilities: ['local-execution', 'isolated-context', 'downloads', 'snapshot', 'screenshot', 'batch'],
+      }),
+      desktop: () => {
+        const status = registry.status(clientInfo.scope);
+        return {
+          label: 'Desktop Browser Agent',
+          ...status,
+          reason: status.available ? undefined :
+            (status.reason || 'Desktop Browser Agent 未连接或组件版本不匹配'),
+          version: status.agentVersion,
+          capabilities: ['existing-login-state', 'background-tabs', 'virtual-cursor', 'takeover', 'sessions', 'batch'],
+        };
+      },
     }),
     disposed: async () => {},
     health: () => registry.health(),

@@ -161,7 +161,7 @@ export async function resolveCLIConfigForCLI(daemonProfilesDir: string, sessionN
     mobile: options.mobile,
     extension: options.extension,
     userDataDir: options.profile,
-    snapshotMode: 'full',
+    snapshotMode: 'none',
   });
 
   const envOverrides = configFromEnv(env);

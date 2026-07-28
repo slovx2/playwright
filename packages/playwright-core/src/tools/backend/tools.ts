@@ -15,6 +15,7 @@
  */
 
 import * as z from 'zod';
+import batch from './batch';
 import common from './common';
 import config from './config';
 import console from './console';
@@ -34,6 +35,7 @@ import route from './route';
 import runCode from './runCode';
 import snapshot from './snapshot';
 import screenshot from './screenshot';
+import session from './session';
 import storage from './storage';
 import tabs from './tabs';
 import tracing from './tracing';
@@ -46,6 +48,7 @@ import type { Tool } from './tool';
 import type { ContextConfig } from './context';
 
 export const browserTools: Tool<any>[] = [
+  ...batch,
   ...common,
   ...config,
   ...console,
@@ -64,6 +67,7 @@ export const browserTools: Tool<any>[] = [
   ...route,
   ...runCode,
   ...screenshot,
+  ...session,
   ...snapshot,
   ...storage,
   ...tabs,

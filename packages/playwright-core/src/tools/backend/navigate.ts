@@ -58,7 +58,6 @@ const goBack = defineTabTool({
 
 const goForward = defineTabTool({
   capability: 'core-navigation',
-  skillOnly: true,
   schema: {
     name: 'browser_navigate_forward',
     title: 'Go forward',
@@ -76,7 +75,6 @@ const goForward = defineTabTool({
 
 const reload = defineTabTool({
   capability: 'core-navigation',
-  skillOnly: true,
   schema: {
     name: 'browser_reload',
     title: 'Reload the page',
@@ -86,7 +84,7 @@ const reload = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    await tab.page.reload(tab.navigationTimeoutOptions);
+    await tab.page.reload({ waitUntil: 'commit', ...tab.navigationTimeoutOptions });
     response.setIncludeSnapshot();
     response.addCode(`await page.reload();`);
   },

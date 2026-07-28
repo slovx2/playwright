@@ -57,6 +57,9 @@ export class BrowserModel {
   private _knownTabs = new Map<number, Tab>();
   // Subset of _knownTabs we've attached the debugger to and assigned a sessionId.
   private _tabSessions = new Map<number, TabSession>();
+  // chrome.tabs.update can announce a newly created tab before
+  // Target.createTarget receives chrome.tabs.create's response.
+  private _tabAttachPromises = new Map<number, Promise<TabSession>>();
   private _autoAttach = false;
   private _nextSessionId = 1;
 
@@ -127,6 +130,13 @@ export class BrowserModel {
     await Promise.all(tabIds.map(tabId => this._attachTab(tabId).catch(logUnhandledError)));
   }
 
+  async discoverTabs(tabs: Tab[]): Promise<number> {
+    for (const tab of tabs)
+      this.onTabCreated(tab);
+    await Promise.all(tabs.map(tab => tab.id === undefined ? undefined : this._attachTab(tab.id)));
+    return this._tabSessions.size;
+  }
+
   async createTarget(url: string | undefined): Promise<{ targetId: string | undefined }> {
     const tab = await this._sendToExtension('chrome.tabs.create', [{ url }]);
     if (tab?.id === undefined)
@@ -192,6 +202,20 @@ export class BrowserModel {
     const existing = this._tabSessions.get(tabId);
     if (existing)
       return existing;
+    const pending = this._tabAttachPromises.get(tabId);
+    if (pending)
+      return await pending;
+    const promise = this._attachTabOnce(tabId);
+    this._tabAttachPromises.set(tabId, promise);
+    try {
+      return await promise;
+    } finally {
+      if (this._tabAttachPromises.get(tabId) === promise)
+        this._tabAttachPromises.delete(tabId);
+    }
+  }
+
+  private async _attachTabOnce(tabId: number): Promise<TabSession> {
     await this._sendToExtension('chrome.debugger.attach', [{ tabId }, '1.3']);
     const result = await this._sendToExtension('chrome.debugger.sendCommand', [
       { tabId },

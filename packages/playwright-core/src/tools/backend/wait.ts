@@ -32,13 +32,13 @@ const wait = defineTool({
     type: 'assertion',
   },
 
-  handle: async (context, params, response) => {
+  handle: async (context, params, response, signal) => {
     if (!params.text && !params.textGone && !params.time)
       throw new Error('Either time, text or textGone must be provided');
 
     if (params.time) {
       response.addCode(`await new Promise(f => setTimeout(f, ${params.time!} * 1000));`);
-      await new Promise(f => setTimeout(f, Math.min(30000, params.time! * 1000)));
+      await abortableDelay(Math.min(30000, params.time! * 1000), signal);
     }
 
     const tab = context.currentTabOrDie();
@@ -63,3 +63,21 @@ const wait = defineTool({
 export default [
   wait,
 ];
+
+async function abortableDelay(time: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted)
+    throw signal.reason ?? new Error('Browser wait was cancelled');
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(done, time);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      reject(signal?.reason ?? new Error('Browser wait was cancelled'));
+    };
+    function done() {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}

@@ -27,6 +27,7 @@ export class RelayConnection {
   private _closed = false;
 
   onclose?: () => void;
+  onheartbeatack?: (at: number) => void;
   ontabattached?: (tabId: number) => void;
   ontabdetached?: (tabId: number) => void;
 
@@ -46,6 +47,10 @@ export class RelayConnection {
 
   get attachedTabs(): ReadonlySet<number> {
     return this._attached;
+  }
+
+  hasActiveSessions(): boolean {
+    return this._handler.hasActiveSessions();
   }
 
   attachTab(tab: chrome.tabs.Tab): void {
@@ -111,6 +116,11 @@ export class RelayConnection {
       this._send({ error: { code: -32700, message: String(error) } });
       return;
     }
+    if (command.method === 'tyrs.heartbeat_ack') {
+      const params = Array.isArray(command.params) ? command.params : [];
+      this.onheartbeatack?.(Number((params[0] as { at?: number } | undefined)?.at || 0));
+      return;
+    }
     const response: ProtocolResponse = { id: command.id };
     try {
       response.result = await this._handler.handleCommand(command);
@@ -130,6 +140,7 @@ export class RelayConnection {
       return;
     this._closed = true;
     this._eventListeners.splice(0).forEach(remove => remove());
+    void this._handler.dispose();
     for (const tabId of [...this._attached]) {
       void chrome.debugger.detach({ tabId }).catch(() => undefined);
       this._notifyDetached(tabId);

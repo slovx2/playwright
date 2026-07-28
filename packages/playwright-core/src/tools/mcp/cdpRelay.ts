@@ -55,6 +55,7 @@ type CDPResponse = CDPMessage;
 export interface CDPRelayDelegate {
   onExtensionEvent?(method: keyof ExtensionEventsV2, params: any): void;
   onCDPMessage?(message: CDPResponse, forward: (message: CDPResponse) => void): void | Promise<void>;
+  onCDPTiming?(method: string, durationMs: number): void;
 }
 
 export class CDPRelayServer {
@@ -105,6 +106,20 @@ export class CDPRelayServer {
     if (!this._extensionConnection)
       throw new Error('Extension not connected');
     return await this._extensionConnection.send('chrome.downloads.search', [{ id }]);
+  }
+
+  async extensionCommand<M extends keyof ExtensionCommandV2>(method: M, params: ExtensionCommandV2[M]['params']): Promise<ExtensionCommandV2[M]['result']> {
+    if (!this._extensionConnection)
+      throw new Error('Extension not connected');
+    return await this._extensionConnection.send(method, params);
+  }
+
+  async discoverTabs(): Promise<{ count: number, tabs: protocol.Tab[] }> {
+    if (!this._extensionConnection)
+      throw new Error('Extension not connected');
+    const tabs = await this._extensionConnection.send('tyrs.tabs.discover', []) as protocol.Tab[];
+    const count = await this._handler.discoverTabs(tabs);
+    return { count, tabs };
   }
 
   async establishExtensionConnection(_clientName: string) {
@@ -207,6 +222,7 @@ export class CDPRelayServer {
   private async _handlePlaywrightMessage(message: CDPCommand): Promise<void> {
     debugLogger('← Playwright:', `${message.method} (id=${message.id})`);
     const { id, sessionId, method, params } = message;
+    const startedAt = performance.now();
     try {
       const result = await this._handleCDPCommand(method, params, sessionId);
       this._sendToCDPClient({ id, sessionId, result });
@@ -217,6 +233,8 @@ export class CDPRelayServer {
         sessionId,
         error: { message: (e as Error).message }
       });
+    } finally {
+      this._delegate?.onCDPTiming?.(method, performance.now() - startedAt);
     }
   }
 
@@ -312,6 +330,12 @@ class ExtensionConnection {
   }
 
   private _handleParsedMessage(object: ExtensionResponse) {
+    if (object.method === 'tyrs.heartbeat') {
+      const at = Number(object.params?.[0]?.at || 0);
+      if (this._ws.readyState === ws.OPEN)
+        this._ws.send(JSON.stringify({ method: 'tyrs.heartbeat_ack', params: [{ at }] }));
+      return;
+    }
     if (object.id && this._callbacks.has(object.id)) {
       const callback = this._callbacks.get(object.id)!;
       this._callbacks.delete(object.id);

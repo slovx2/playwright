@@ -29,16 +29,16 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
   let result: R;
   try {
     result = await callback();
-    await tab.waitForTimeout(500);
+    // The action itself already waits for a navigation it initiates. Keep only
+    // a short window for request events emitted immediately after DOM handlers.
+    await tab.waitForTimeout(50);
   } finally {
     disposeListeners();
   }
 
   const requestedNavigation = requests.some(request => request.isNavigationRequest());
-  if (requestedNavigation) {
-    await tab.page.mainFrame().waitForLoadState('load', { timeout: 10000 }).catch(() => {});
+  if (requestedNavigation)
     return result;
-  }
 
   const promises: Promise<any>[] = [];
   for (const request of requests) {
@@ -47,10 +47,10 @@ export async function waitForCompletion<R>(tab: Tab, callback: () => Promise<R>)
     else
       promises.push(request.response().catch(() => {}));
   }
-  const timeout = new Promise<void>(resolve => setTimeout(resolve, 5000));
+  const timeout = new Promise<void>(resolve => setTimeout(resolve, 1000));
   await Promise.race([Promise.all(promises), timeout]);
   if (requests.length)
-    await tab.waitForTimeout(500);
+    await tab.waitForTimeout(50);
 
   return result;
 }

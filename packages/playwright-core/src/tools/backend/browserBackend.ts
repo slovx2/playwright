@@ -16,6 +16,7 @@
 
 import * as z from 'zod';
 import debug from 'debug';
+import { browserBatch } from './batch';
 import { Context } from './context';
 import { Response } from './response';
 import { SessionLog } from './sessionLog';
@@ -56,6 +57,64 @@ export class BrowserBackend implements ServerBackend {
   }
 
   async callTool(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'] & { _meta?: Record<string, any> } = {}, signal?: AbortSignal): Promise<mcpServer.CallToolResult & { isClose?: boolean }> {
+    if (name === browserBatch.schema.name)
+      return await this._callBatch(rawArguments, signal);
+    return await this._callSingleTool(name, rawArguments, signal);
+  }
+
+  private async _callBatch(rawArguments: mcpServer.CallToolRequest['params']['arguments'] & { _meta?: Record<string, any> }, signal?: AbortSignal): Promise<mcpServer.CallToolResult & { isClose?: boolean }> {
+    const parsed = browserBatch.schema.inputSchema.safeParse(rawArguments);
+    if (!parsed.success) {
+      return {
+        content: [{ type: 'text', text: `### Error\nInvalid arguments for tool "browser_batch":\n${z.prettifyError(parsed.error)}` }],
+        isError: true,
+      };
+    }
+
+    const summaries: Array<{ index: number, name: string, ok: boolean, text: string, timing?: unknown }> = [];
+    const attachments: mcpServer.CallToolResult['content'] = [];
+    let failed = false;
+    let close = false;
+    const startedAt = performance.now();
+    for (let index = 0; index < parsed.data.actions.length; index++) {
+      if (signal?.aborted)
+        throw signal.reason ?? new Error('Browser batch was cancelled');
+      const action = parsed.data.actions[index];
+      const url = typeof action.arguments.url === 'string' ? action.arguments.url.trim() : '';
+      if ((action.name === 'browser_navigate' || action.name === 'browser_tabs') && /^javascript:/i.test(url)) {
+        summaries.push({ index, name: action.name, ok: false,
+          text: 'javascript: URLs are not allowed in browser_batch' });
+        failed = true;
+        break;
+      }
+      const result = await this._callSingleTool(action.name, { ...action.arguments, _meta: rawArguments._meta }, signal);
+      const text = result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
+      summaries.push({ index, name: action.name, ok: !result.isError, text,
+        timing: (result as any)._meta?.tyrsTiming });
+      attachments.push(...result.content.filter(item => item.type !== 'text'));
+      close ||= result.isClose === true;
+      if (result.isError) {
+        failed = true;
+        break;
+      }
+      if (result.isClose)
+        break;
+    }
+
+    const payload = {
+      completed: summaries.filter(step => step.ok).length,
+      failedAt: failed ? summaries.length - 1 : undefined,
+      durationMs: Math.round((performance.now() - startedAt) * 100) / 100,
+      steps: summaries,
+    };
+    return {
+      content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }, ...attachments],
+      ...(failed ? { isError: true } : {}),
+      ...(close ? { isClose: true } : {}),
+    };
+  }
+
+  private async _callSingleTool(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'] & { _meta?: Record<string, any> } = {}, signal?: AbortSignal): Promise<mcpServer.CallToolResult & { isClose?: boolean }> {
     const json = !!rawArguments._meta?.json;
     const formatError = (message: string): mcpServer.CallToolResult => ({
       content: [{ type: 'text' as const, text: json ? JSON.stringify({ isError: true, error: message }, null, 2) : `### Error\n${message}` }],
@@ -78,11 +137,22 @@ export class BrowserBackend implements ServerBackend {
     const response = new Response(context, name, parsedArguments, { relativeTo: cwd, raw, json });
     context.setRunningTool(name);
     let responseObject: mcpServer.CallToolResult & { isClose?: boolean };
+    const actionStartedAt = performance.now();
+    let actionFinishedAt = actionStartedAt;
     try {
       await tool.handle(context, parsedArguments, response, signal);
+      actionFinishedAt = performance.now();
       for (const reason of context.drainPendingUnhandledRejections())
         response.addError(formatRejectionReason(reason));
       responseObject = await response.serialize();
+      (responseObject as any)._meta = {
+        ...(responseObject as any)._meta,
+        tyrsTiming: {
+          pageActionMs: Math.round((actionFinishedAt - actionStartedAt) * 100) / 100,
+          ...response.timings(),
+          totalMs: Math.round((performance.now() - actionStartedAt) * 100) / 100,
+        },
+      };
       this._sessionLog?.logResponse(name, parsedArguments, responseObject);
     } catch (error: any) {
       const messages = [String(error), ...context.drainPendingUnhandledRejections().map(formatRejectionReason)];

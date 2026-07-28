@@ -27,6 +27,7 @@ let attachTab: ReturnType<typeof spy>;
 let detachTab: ReturnType<typeof spy>;
 let didInitialize: ReturnType<typeof spy>;
 let closeConnection: ReturnType<typeof spy>;
+let query: ReturnType<typeof spy>;
 
 beforeEach(() => {
   created = eventMock();
@@ -36,13 +37,14 @@ beforeEach(() => {
   detachTab = spy();
   didInitialize = spy();
   closeConnection = spy();
+  query = spy([
+    { id: 1, url: 'https://example.com' },
+    { id: 2, url: 'chrome://settings' },
+    { id: 3 },
+  ]);
   globalThis.chrome = {
     tabs: {
-      query: async () => [
-        { id: 1, url: 'https://example.com' },
-        { id: 2, url: 'chrome://settings' },
-        { id: 3 },
-      ],
+      query,
       onCreated: created,
       onUpdated: updated,
       onRemoved: removed,
@@ -50,20 +52,22 @@ beforeEach(() => {
   } as unknown as typeof chrome;
 });
 
-test('enumerates current-profile tabs and tracks every lifecycle branch', async () => {
-  const relay = { attachTab, detachTab, didInitialize, close: closeConnection } as any;
+test('attaches only popups from controlled tabs and tracks their lifecycle', async () => {
+  const relay = { attachTab, detachTab, didInitialize, close: closeConnection,
+    attachedTabs: new Set([1, 4]) } as any;
   const profile = new ProfileConnection(relay);
   await profile.initialize();
-  assert.deepEqual(attachTab.calls, [[{ id: 1, url: 'https://example.com' }]]);
+  assert.deepEqual(attachTab.calls, []);
   assert.equal(didInitialize.calls.length, 1);
 
-  created.emit({ id: 4, url: 'https://new.example' });
+  created.emit({ id: 4, openerTabId: 1, url: 'https://new.example' });
+  created.emit({ id: 6, openerTabId: 99, url: 'https://unrelated.example' });
   created.emit({ id: 5, url: 'chrome-extension://blocked/page.html' });
   updated.emit(4, { status: 'loading' }, { id: 4, url: 'https://new.example' });
   updated.emit(4, { status: 'complete' }, { id: 4, url: 'https://new.example/done' });
   updated.emit(4, { url: 'chrome://version' }, { id: 4, url: 'chrome://version' });
   removed.emit(4);
-  assert.equal(attachTab.calls.length, 3);
+  assert.equal(attachTab.calls.length, 2);
   assert.deepEqual(detachTab.calls, [[4], [4]]);
 
   profile.close('bridge disconnected');
@@ -85,11 +89,14 @@ test('filters every internal scheme plus tabs without IDs or URLs', () => {
   assert.equal(isDebuggable({ url: 'https://example.com' } as chrome.tabs.Tab), false);
 });
 
-test('query failure does not emit initialized or leave listeners installed', async () => {
-  chrome.tabs.query = async () => { throw new Error('query failed'); };
-  const profile = new ProfileConnection({ attachTab, detachTab, didInitialize, close: closeConnection } as any);
-  await assert.rejects(profile.initialize(), /query failed/);
-  profile.close();
-  assert.equal(didInitialize.calls.length, 0);
-  assert.equal(created.listeners.size, 0);
+test('does not enumerate existing user tabs during initialization', async () => {
+  const profile = new ProfileConnection({
+    attachTab,
+    detachTab,
+    didInitialize,
+    close: closeConnection,
+    attachedTabs: new Set(),
+  } as any);
+  await profile.initialize();
+  assert.equal(query.calls.length, 0);
 });

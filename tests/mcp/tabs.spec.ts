@@ -33,107 +33,78 @@ async function createTab(client: Client, title: string, body: string) {
   });
 }
 
+async function tabs(client: Client, action: Record<string, unknown> = { action: 'list' }) {
+  const response = await client.callTool({ name: 'browser_tabs', arguments: action });
+  const text = response.content.find(item => item.type === 'text')?.text || '';
+  const result = text.match(/### Result\n([\s\S]*?)(?:\n### |$)/)?.[1];
+  expect(result).toBeTruthy();
+  return JSON.parse(result!).tabs.map(tab => ({
+    title: tab.title,
+    url: tab.url,
+    current: tab.current,
+    origin: tab.origin,
+  }));
+}
+
 test('list initial tabs', async ({ client }) => {
-  expect(await client.callTool({
-    name: 'browser_tabs',
-    arguments: {
-      action: 'list',
-    },
-  })).toHaveResponse({
-    result: `- 0: (current) [](about:blank)`,
-  });
+  expect(await tabs(client)).toEqual([
+    { title: '', url: 'about:blank', current: true, origin: 'user' },
+  ]);
 });
 
 test('list first tab', async ({ client }) => {
   await createTab(client, 'Tab one', 'Body one');
-  expect(await client.callTool({
-    name: 'browser_tabs',
-    arguments: {
-      action: 'list',
-    },
-  })).toHaveResponse({
-    result: `- 0: [](about:blank)
-- 1: (current) [Tab one](data:text/html,<title>Tab one</title><body>Body one</body>)`,
-  });
+  expect(await tabs(client)).toEqual([
+    { title: '', url: 'about:blank', current: false, origin: 'user' },
+    { title: 'Tab one', url: 'data:text/html,<title>Tab one</title><body>Body one</body>', current: true, origin: 'agent' },
+  ]);
 });
 
 test('create new tab', async ({ client }) => {
-  expect(await createTab(client, 'Tab one', 'Body one')).toHaveResponse({
-    tabs: `- 0: [](about:blank)
-- 1: (current) [Tab one](data:text/html,<title>Tab one</title><body>Body one</body>)`,
-    snapshot: `- generic [active] [ref=e1]: Body one`,
-  });
-
-  expect(await createTab(client, 'Tab two', 'Body two')).toHaveResponse({
-    tabs: `- 0: [](about:blank)
-- 1: [Tab one](data:text/html,<title>Tab one</title><body>Body one</body>)
-- 2: (current) [Tab two](data:text/html,<title>Tab two</title><body>Body two</body>)`,
-    snapshot: `- generic [active] [ref=e1]: Body two`,
-  });
+  await createTab(client, 'Tab one', 'Body one');
+  await createTab(client, 'Tab two', 'Body two');
+  expect(await tabs(client)).toEqual([
+    { title: '', url: 'about:blank', current: false, origin: 'user' },
+    { title: 'Tab one', url: 'data:text/html,<title>Tab one</title><body>Body one</body>', current: false, origin: 'agent' },
+    { title: 'Tab two', url: 'data:text/html,<title>Tab two</title><body>Body two</body>', current: true, origin: 'agent' },
+  ]);
   expect(await client.callTool({
     name: 'browser_snapshot',
     arguments: {},
   })).toHaveResponse({
     page: expect.stringContaining('Page URL: data:text/html,<title>Tab two</title><body>Body two</body>'),
+    inlineSnapshot: expect.stringContaining('Body two'),
   });
 });
 
 test('create new tab with url', async ({ client }) => {
-  expect(await client.callTool({
-    name: 'browser_tabs',
-    arguments: {
-      action: 'new',
-      url: `data:text/html,<title>Tab one</title><body>Body one</body>`,
-    },
-  })).toHaveResponse({
-    result: `- 0: [](about:blank)
-- 1: (current) [Tab one](data:text/html,<title>Tab one</title><body>Body one</body>)`,
+  await tabs(client, {
+    action: 'new',
+    url: `data:text/html,<title>Tab one</title><body>Body one</body>`,
   });
+  expect(await tabs(client)).toEqual([
+    { title: '', url: 'about:blank', current: false, origin: 'user' },
+    { title: 'Tab one', url: 'data:text/html,<title>Tab one</title><body>Body one</body>', current: true, origin: 'agent' },
+  ]);
 });
 
 test('select tab', async ({ client }) => {
   await createTab(client, 'Tab one', 'Body one');
   await createTab(client, 'Tab two', 'Body two');
 
-  expect(await client.callTool({
-    name: 'browser_tabs',
-    arguments: {
-      action: 'select',
-      index: 1,
-    },
-  })).toHaveResponse({
-    result: `- 0: [](about:blank)
-- 1: (current) [Tab one](data:text/html,<title>Tab one</title><body>Body one</body>)
-- 2: [Tab two](data:text/html,<title>Tab two</title><body>Body two</body>)`,
-  });
-
-  expect(await client.callTool({
-    name: 'browser_tabs',
-    arguments: {
-      action: 'select',
-      index: 0,
-    },
-  })).toHaveResponse({
-    result: `- 0: (current) [](about:blank)
-- 1: [Tab one](data:text/html,<title>Tab one</title><body>Body one</body>)
-- 2: [Tab two](data:text/html,<title>Tab two</title><body>Body two</body>)`,
-  });
+  const selected = await tabs(client, { action: 'select', index: 1 });
+  expect(selected.map(tab => tab.current)).toEqual([false, true, false]);
+  const initial = await tabs(client, { action: 'select', index: 0 });
+  expect(initial.map(tab => tab.current)).toEqual([true, false, false]);
 });
 
 test('close tab', async ({ client }) => {
   await createTab(client, 'Tab one', 'Body one');
   await createTab(client, 'Tab two', 'Body two');
 
-  expect(await client.callTool({
-    name: 'browser_tabs',
-    arguments: {
-      action: 'close',
-      index: 2,
-    },
-  })).toHaveResponse({
-    result: `- 0: [](about:blank)
-- 1: (current) [Tab one](data:text/html,<title>Tab one</title><body>Body one</body>)`,
-  });
+  const remaining = await tabs(client, { action: 'close', index: 2 });
+  expect(remaining.map(tab => tab.title)).toEqual(['', 'Tab one']);
+  expect(remaining.map(tab => tab.current)).toEqual([false, true]);
 });
 
 test('reuse first tab when navigating', async ({ startClient, cdpServer, server }) => {

@@ -16,7 +16,6 @@
 
 import * as z from 'zod';
 import { defineTool } from './tool';
-import { renderTabsMarkdown } from './response';
 
 const browserTabs = defineTool({
   capability: 'core-tabs',
@@ -26,8 +25,11 @@ const browserTabs = defineTool({
     title: 'Manage tabs',
     description: 'List, create, close, or select a browser tab.',
     inputSchema: z.object({
-      action: z.enum(['list', 'new', 'close', 'select']).describe('Operation to perform'),
+      action: z.enum(['list', 'new', 'close', 'select', 'claim', 'mark_deliverable', 'mark_handoff', 'finalize']).describe('Operation to perform'),
       index: z.number().optional().describe('Tab index, used for close/select. If omitted for close, current tab is closed.'),
+      tabId: z.string().optional().describe('Stable tab id used for claim and disposition actions.'),
+      title: z.string().optional().describe('Expected current tab title used for fail-closed claim.'),
+      expectedUrl: z.string().optional().describe('Expected current tab URL used for fail-closed claim.'),
       url: z.string().optional().describe('URL to navigate to in the new tab, used for new.'),
     }),
     type: 'action',
@@ -58,10 +60,39 @@ const browserTabs = defineTool({
         await context.selectTab(params.index);
         break;
       }
+      case 'claim': {
+        if (!params.tabId || params.title === undefined || params.expectedUrl === undefined)
+          throw new Error('tabId, title and expectedUrl are required');
+        await context.claimTab(params.tabId, params.title, params.expectedUrl);
+        break;
+      }
+      case 'mark_deliverable': {
+        context.markTab(params.tabId, 'deliverable');
+        break;
+      }
+      case 'mark_handoff': {
+        context.markTab(params.tabId, 'handoff');
+        break;
+      }
+      case 'finalize': {
+        await context.finalizeTabs();
+        response.setClose();
+        break;
+      }
     }
     const tabHeaders = await Promise.all(context.tabs().map(tab => tab.headerSnapshot()));
-    const result = renderTabsMarkdown(tabHeaders);
-    response.addTextResult(result.join('\n'));
+    const tabs = tabHeaders.map((header, index) => {
+      const tab = context.tabs()[index];
+      return { index, ...header, ...context.tabState(tab) };
+    });
+    if (params.action === 'list') {
+      const available = await context.availableTabs();
+      tabs.push(...available.map((tab, offset) => ({
+        index: tabs.length + offset,
+        ...tab,
+      })));
+    }
+    response.addTextResult(JSON.stringify({ session: context.sessionName(), tabs }, null, 2));
   },
 });
 

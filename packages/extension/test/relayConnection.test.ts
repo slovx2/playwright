@@ -24,6 +24,7 @@ let debuggerEvent: ReturnType<typeof eventMock>;
 let debuggerDetach: ReturnType<typeof eventMock>;
 let tabCreated: ReturnType<typeof eventMock>;
 let tabRemoved: ReturnType<typeof eventMock>;
+let tabUpdated: ReturnType<typeof eventMock>;
 let downloadCreated: ReturnType<typeof eventMock>;
 let downloadChanged: ReturnType<typeof eventMock>;
 let detach: ReturnType<typeof spy>;
@@ -35,14 +36,31 @@ beforeEach(() => {
   debuggerDetach = eventMock();
   tabCreated = eventMock();
   tabRemoved = eventMock();
+  tabUpdated = eventMock();
   downloadCreated = eventMock();
   downloadChanged = eventMock();
   detach = spy();
   Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: { OPEN: 1 } });
   globalThis.chrome = {
     debugger: { attach: spy(), detach, sendCommand: spy({}), onEvent: debuggerEvent, onDetach: debuggerDetach },
-    tabs: { create: spy({}), remove: spy(), onCreated: tabCreated, onRemoved: tabRemoved },
+    tabs: {
+      create: spy({}),
+      remove: spy(),
+      get: spy({ id: 7, windowId: 1, url: 'https://example.com' }),
+      update: spy({ id: 7, windowId: 1 }),
+      group: spy(1),
+      sendMessage: spy({ ok: true }),
+      onCreated: tabCreated,
+      onRemoved: tabRemoved,
+      onUpdated: tabUpdated,
+    },
     downloads: { search: spy([]), onCreated: downloadCreated, onChanged: downloadChanged },
+    tabGroups: { update: spy() },
+    windows: { get: spy({ focused: true }), update: spy() },
+    webNavigation: { onCommitted: eventMock() },
+    scripting: { executeScript: spy() },
+    runtime: { onMessage: eventMock() },
+    storage: { session: { get: spy({}), set: spy() } },
   } as unknown as typeof chrome;
   sent = [];
   socket = { readyState: 1, send: (value: string) => sent.push(value), close: spy() };
@@ -86,6 +104,18 @@ test('returns parse and protocol errors without invoking Chrome APIs', async () 
   await nextTurn();
   assert.deepEqual(JSON.parse(sent.at(-1)!), { id: 10, error: 'Invalid params for chrome.tabs.remove' });
   assert.equal((chrome.debugger.attach as any).calls.length, 0);
+});
+
+test('handles heartbeat acknowledgements outside the command queue', async () => {
+  const relay = new RelayConnection(socket);
+  const acknowledgements: number[] = [];
+  relay.onheartbeatack = at => acknowledgements.push(at);
+  socket.onmessage({
+    data: JSON.stringify({ method: 'tyrs.heartbeat_ack', params: [{ at: 1234 }] }),
+  });
+  await nextTurn();
+  assert.deepEqual(acknowledgements, [1234]);
+  assert.equal(sent.length, 0);
 });
 
 test('detach requests are ignored for unknown tabs and forwarded for attached tabs', async () => {

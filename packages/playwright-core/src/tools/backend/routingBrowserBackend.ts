@@ -5,7 +5,6 @@
 
 import * as z from 'zod';
 
-import type { BrowserBackend } from './browserBackend';
 import type * as mcpServer from '../utils/mcp/server';
 import type { ClientInfo, ServerBackend } from '../utils/mcp/server';
 import type { ToolSchema } from '../utils/mcp/tool';
@@ -22,11 +21,18 @@ export const browserSelectSchema: ToolSchema<any> = {
   type: 'action',
 };
 
-type BackendFactory = () => Promise<BrowserBackend>;
-type Availability = () => { available: boolean, label: string, details?: Record<string, unknown> };
+type BackendFactory = () => Promise<ServerBackend>;
+type Availability = () => {
+  available: boolean;
+  label: string;
+  reason?: string;
+  version?: string;
+  capabilities?: string[];
+  details?: Record<string, unknown>;
+};
 
 export class RoutingBrowserBackend implements ServerBackend {
-  private readonly _backends = new Map<BrowserId, Promise<BrowserBackend>>();
+  private readonly _backends = new Map<BrowserId, Promise<ServerBackend>>();
   private _selected: BrowserId = 'worker';
   private _clientInfo?: ClientInfo;
 
@@ -42,7 +48,7 @@ export class RoutingBrowserBackend implements ServerBackend {
   async dispose(): Promise<void> {
     await Promise.all([...this._backends.values()].map(async promise => {
       const backend = await promise.catch(() => undefined);
-      await backend?.dispose().catch(() => {});
+      await backend?.dispose?.().catch(() => {});
     }));
     this._backends.clear();
   }
@@ -54,35 +60,35 @@ export class RoutingBrowserBackend implements ServerBackend {
     const state = this._availability[selected]();
     if (!state.available)
       return errorResult(`${state.label}不可用；当前选择未改变，请等待恢复或调用 browser_select 切换浏览器`);
-    let activeBackend: BrowserBackend | undefined;
+    let activeBackend: ServerBackend | undefined;
     try {
       activeBackend = await this._backend(selected);
-      const result = await activeBackend.callTool(name, args, signal);
+      const result = await activeBackend.callTool(name, args, signal ?? new AbortController().signal);
       if (result.isClose) {
         delete result.isClose;
         this._backends.delete(selected);
-        await activeBackend.dispose().catch(() => {});
+        await activeBackend.dispose?.().catch(() => {});
       }
       return result;
     } catch (error) {
       const promise = this._backends.get(selected);
       if (activeBackend && await promise?.catch(() => undefined) === activeBackend)
         this._backends.delete(selected);
-      await activeBackend?.dispose().catch(() => {});
+      await activeBackend?.dispose?.().catch(() => {});
       return errorResult(error instanceof Error ? error.message : String(error));
     }
   }
 
-  private async _backend(browser: BrowserId): Promise<BrowserBackend> {
+  private async _backend(browser: BrowserId): Promise<ServerBackend> {
     let promise = this._backends.get(browser);
     if (!promise) {
       promise = (async () => {
         const backend = await this._factories[browser]();
         try {
-          await backend.initialize(this._clientInfo!);
+          await backend.initialize?.(this._clientInfo!);
           return backend;
         } catch (error) {
-          await backend.dispose().catch(() => {});
+          await backend.dispose?.().catch(() => {});
           throw error;
         }
       })().catch(error => {

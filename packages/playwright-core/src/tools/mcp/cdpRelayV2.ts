@@ -33,6 +33,7 @@ import { BrowserModel } from './browserModel';
 
 import type { ExtensionProtocolHandler, SendCommand, SendToCDPClient } from './cdpRelayHandler';
 import type { ExtensionEventsV2 } from './protocol';
+import type { Tab } from './protocol';
 
 export class ExtensionProtocolV2 implements ExtensionProtocolHandler {
   private _model: BrowserModel;
@@ -51,6 +52,10 @@ export class ExtensionProtocolV2 implements ExtensionProtocolHandler {
 
   connectOverCDP(sendToCDPClient: SendToCDPClient): void {
     this._model.connectOverCDP(sendToCDPClient);
+  }
+
+  async discoverTabs(tabs: Tab[]): Promise<number> {
+    return await this._model.discoverTabs(tabs);
   }
 
   onExtensionDisconnect(reason: string): void {

@@ -42,10 +42,16 @@ export default defineConfig({
     outDir: resolve(__dirname, 'dist/'),
     emptyOutDir: true,
     minify: false,
-    lib: {
-      entry: resolve(__dirname, 'src/background.ts'),
-      fileName: () => 'lib/background.mjs',
-      formats: ['es']
+    rollupOptions: {
+      input: {
+        background: resolve(__dirname, 'src/background.ts'),
+        cursor: resolve(__dirname, 'src/cursorContent.ts'),
+      },
+      output: {
+        format: 'es',
+        entryFileNames: 'lib/[name].mjs',
+        chunkFileNames: 'lib/chunks/[name]-[hash].mjs',
+      }
     }
   }
 });

@@ -7,22 +7,40 @@ import { ProfileConnection, isDebuggable } from './profileConnection';
 import { RelayConnection } from './relayConnection';
 import { ExtensionConfiguration, loadConfiguration } from './configuration';
 
-const reconnectDelayMs = 5_000;
-const heartbeatIntervalMs = 30_000;
+const reconnectDelayMs = 2_000;
+const reconnectAlarmDelayMinutes = 0.5;
+const reconnectAlarmName = 'tyrs-browser-reconnect-v2';
+const connectTimeoutMs = 2_000;
+const heartbeatIntervalMs = 20_000;
+const heartbeatTimeoutMs = 45_000;
+const pendingUpdateKey = 'tyrsPendingExtensionUpdate';
 
 class TyrsBrowserExtension {
   private _profile?: ProfileConnection;
   private _socket?: WebSocket;
   private _heartbeat?: number;
   private _reconnect?: number;
+  private _connectTimeout?: number;
   private _connectedAt?: string;
   private _configuration?: ExtensionConfiguration;
   private _connecting?: Promise<void>;
+  private _lastHeartbeatAckAt = 0;
+  private _fastRetryUsed = false;
 
   constructor() {
     chrome.runtime.onInstalled.addListener(() => void this._connect());
     chrome.runtime.onStartup.addListener(() => void this._connect());
-    chrome.storage.onChanged.addListener(() => this._restart());
+    chrome.runtime.onUpdateAvailable.addListener(() => void this._onUpdateAvailable());
+    chrome.alarms.onAlarm.addListener(alarm => {
+      if (alarm.name === reconnectAlarmName) {
+        this._fastRetryUsed = false;
+        void this._connect();
+      }
+    });
+    chrome.storage.onChanged.addListener((_changes, areaName) => {
+      if (areaName !== 'session')
+        this._restart();
+    });
     void this._connect();
   }
 
@@ -43,6 +61,17 @@ class TyrsBrowserExtension {
       return;
     }
     this._configuration = configuration;
+    const healthUrl = new URL('/health', configuration.statusUrl);
+    try {
+      await fetch(healthUrl, {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(connectTimeoutMs),
+      });
+    } catch {
+      await this._setBadge('OFF', '#B91C1C', 'Tyrs Browser Agent unavailable');
+      this._scheduleReconnect();
+      return;
+    }
     const relay = new URL(configuration.relayUrl);
     relay.searchParams.set('token', configuration.extensionToken);
     const socket = new WebSocket(relay);
@@ -50,13 +79,24 @@ class TyrsBrowserExtension {
     socket.onopen = () => void this._onOpen(socket, configuration);
     socket.onclose = () => this._onDisconnect(socket);
     socket.onerror = () => this._onDisconnect(socket);
+    this._connectTimeout = setTimeout(() => {
+      if (socket === this._socket && socket.readyState !== WebSocket.OPEN)
+        socket.close();
+    }, connectTimeoutMs);
   }
 
   private async _onOpen(socket: WebSocket, configuration: ExtensionConfiguration): Promise<void> {
     if (socket !== this._socket)
       return socket.close();
+    if (this._connectTimeout !== undefined)
+      clearTimeout(this._connectTimeout);
+    this._connectTimeout = undefined;
     this._connectedAt = new Date().toISOString();
+    this._fastRetryUsed = false;
+    void chrome.alarms.clear(reconnectAlarmName);
     const relay = new RelayConnection(socket);
+    this._lastHeartbeatAckAt = Date.now();
+    relay.onheartbeatack = () => this._lastHeartbeatAckAt = Date.now();
     const profile = new ProfileConnection(relay);
     profile.onclose = () => this._onDisconnect(socket);
     this._profile = profile;
@@ -65,9 +105,18 @@ class TyrsBrowserExtension {
       await this._sendStatus(configuration, true);
       await this._setBadge('ON', '#15803D', 'Tyrs Browser Bridge connected');
       this._heartbeat = setInterval(() => {
-        if (socket.readyState === WebSocket.OPEN)
-          socket.send(JSON.stringify({ method: 'tyrs.heartbeat', params: [] }));
+        if (socket.readyState === WebSocket.OPEN) {
+          if (Date.now() - this._lastHeartbeatAckAt > heartbeatTimeoutMs) {
+            socket.close(4000, 'Browser Agent heartbeat timed out');
+            return;
+          }
+          socket.send(JSON.stringify({
+            method: 'tyrs.heartbeat',
+            params: [{ at: Date.now() }],
+          }));
+        }
         void this._sendStatus(configuration, socket.readyState === WebSocket.OPEN);
+        void this._applyPendingUpdate();
       }, heartbeatIntervalMs);
     } catch {
       socket.close(1011, 'Failed to initialize Chrome profile');
@@ -82,9 +131,11 @@ class TyrsBrowserExtension {
     this._profile = undefined;
     this._socket = undefined;
     this._connectedAt = undefined;
+    this._lastHeartbeatAckAt = 0;
     if (this._configuration)
       void this._sendStatus(this._configuration, false);
     void this._setBadge('OFF', '#B91C1C', 'Tyrs Browser Bridge disconnected');
+    void this._applyPendingUpdate();
     this._scheduleReconnect();
   }
 
@@ -95,8 +146,11 @@ class TyrsBrowserExtension {
   }
 
   private _scheduleReconnect(): void {
-    if (this._reconnect === undefined)
+    if (this._reconnect === undefined && !this._fastRetryUsed) {
+      this._fastRetryUsed = true;
       this._reconnect = setTimeout(() => void this._connect(), reconnectDelayMs);
+    }
+    chrome.alarms.create(reconnectAlarmName, { delayInMinutes: reconnectAlarmDelayMinutes });
   }
 
   private _clearTimers(): void {
@@ -104,8 +158,11 @@ class TyrsBrowserExtension {
       clearInterval(this._heartbeat);
     if (this._reconnect !== undefined)
       clearTimeout(this._reconnect);
+    if (this._connectTimeout !== undefined)
+      clearTimeout(this._connectTimeout);
     this._heartbeat = undefined;
     this._reconnect = undefined;
+    this._connectTimeout = undefined;
   }
 
   private async _sendStatus(configuration: ExtensionConfiguration, connected: boolean): Promise<void> {
@@ -121,6 +178,7 @@ class TyrsBrowserExtension {
         profile: 'current',
         tabCount: tabs.length,
         extensionVersion: chrome.runtime.getManifest().version,
+        extensionProtocol: 2,
         chromeVersion: navigator.userAgent,
         connectedAt: this._connectedAt,
       }),
@@ -133,6 +191,20 @@ class TyrsBrowserExtension {
       chrome.action.setBadgeBackgroundColor({ color }),
       chrome.action.setTitle({ title }),
     ]);
+  }
+
+  private async _onUpdateAvailable(): Promise<void> {
+    await chrome.storage.session.set({ [pendingUpdateKey]: true });
+    if (!this._profile?.hasActiveSessions())
+      chrome.runtime.reload();
+  }
+
+  private async _applyPendingUpdate(): Promise<void> {
+    if (this._profile?.hasActiveSessions())
+      return;
+    const stored = await chrome.storage.session.get(pendingUpdateKey);
+    if (stored[pendingUpdateKey] === true)
+      chrome.runtime.reload();
   }
 }
 

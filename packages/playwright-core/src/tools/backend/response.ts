@@ -59,6 +59,8 @@ export class Response {
   readonly toolArgs: Record<string, any>;
   private _clientWorkspace: string;
   private _imageResults: { data: Buffer, imageType: 'png' | 'jpeg' }[] = [];
+  private _snapshotMs = 0;
+  private _serializationMs = 0;
   private _raw: boolean;
   private _json: boolean;
   private _writtenFiles = new Set<string>();
@@ -144,7 +146,7 @@ export class Response {
   }
 
   setIncludeSnapshot() {
-    this._includeSnapshot = this._context.config.snapshot?.mode ?? 'full';
+    this._includeSnapshot = this._context.config.snapshot?.mode ?? 'none';
   }
 
   setIncludeFullSnapshot(includeSnapshotFileName?: string, root?: playwright.Locator, depth?: number, boxes?: boolean) {
@@ -156,6 +158,7 @@ export class Response {
   }
 
   async serialize(): Promise<CallToolResult> {
+    const serializationStartedAt = performance.now();
     const allSections = await this._build();
     await this._enforceOutputBudget();
     const rawSections = ['Error', 'Result', 'Snapshot'] as const;
@@ -213,10 +216,19 @@ export class Response {
       }
     }
 
-    return {
+    const result = {
       content,
       ...(this._isClose ? { isClose: true } : {}),
       ...(sections.some(section => section.isError) ? { isError: true } : {}),
+    };
+    this._serializationMs = performance.now() - serializationStartedAt;
+    return result;
+  }
+
+  timings(): { snapshotMs: number, serializationMs: number } {
+    return {
+      snapshotMs: Math.round(this._snapshotMs * 100) / 100,
+      serializationMs: Math.round(this._serializationMs * 100) / 100,
     };
   }
 
@@ -270,7 +282,10 @@ export class Response {
       addSection('Ran Playwright code', this._code, 'js');
 
     // Render tab titles upon changes or when more than one tab.
-    const tabSnapshot = this._context.currentTab() ? await this._context.currentTabOrDie().captureSnapshot(this._includeSnapshotRoot, this._includeSnapshotDepth, this._includeSnapshotBoxes, this._clientWorkspace) : undefined;
+    const snapshotStartedAt = performance.now();
+    const tabSnapshot = this._includeSnapshot !== 'none' && this._context.currentTab() ?
+      await this._context.currentTabOrDie().captureSnapshot(this._includeSnapshotRoot, this._includeSnapshotDepth, this._includeSnapshotBoxes, this._clientWorkspace) : undefined;
+    this._snapshotMs += performance.now() - snapshotStartedAt;
     const tabHeaders = await Promise.all(this._context.tabs().map(tab => tab.headerSnapshot()));
     if (this._includeSnapshot !== 'none' || tabHeaders.some(header => header.changed)) {
       if (tabHeaders.length !== 1)
@@ -344,7 +359,7 @@ export function renderTabsMarkdown(tabs: TabHeader[]): string[] {
     const tab = tabs[i];
     const current = tab.current ? ' (current)' : '';
     const crashed = tab.crashed ? ' [crashed]' : '';
-    lines.push(`- ${i}:${current} [${tab.title}](${tab.url})${crashed}`);
+    lines.push(`- ${i}:${current} [${tab.title}](${tab.url})${crashed} id=${tab.id}`);
   }
   return lines;
 }

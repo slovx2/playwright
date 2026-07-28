@@ -73,6 +73,7 @@ type EventEntry = ConsoleLogEntry | DownloadStartLogEntry | DownloadFinishLogEnt
 
 
 export type TabHeader = {
+  id: string;
   title: string;
   url: string;
   current: boolean;
@@ -89,9 +90,10 @@ type TabSnapshot = {
 };
 
 export class Tab extends EventEmitter<TabEventsInterface> {
+  readonly id: string;
   readonly context: Context;
   readonly page: playwright.Page;
-  private _lastHeader: TabHeader = { title: 'about:blank', url: 'about:blank', current: false, crashed: false, console: { total: 0, warnings: 0, errors: 0 } };
+  private _lastHeader: TabHeader;
   private _downloads: Download[] = [];
   private _requests: playwright.Request[] = [];
   private _mainDocumentStatus: { status: number, statusText: string } | undefined;
@@ -106,8 +108,10 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   readonly navigationTimeoutOptions: { timeout?: number; };
   readonly expectTimeoutOptions: { timeout?: number; };
 
-  constructor(context: Context, page: playwright.Page, onPageClose: (tab: Tab) => void) {
+  constructor(context: Context, page: playwright.Page, onPageClose: (tab: Tab) => void, id: string = crypto.randomUUID()) {
     super();
+    this.id = id;
+    this._lastHeader = { id, title: 'about:blank', url: 'about:blank', current: false, crashed: false, console: { total: 0, warnings: 0, errors: 0 } };
     this.context = context;
     this.page = page;
     this._onPageClose = onPageClose;
@@ -289,6 +293,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       consoleCounts = await this.consoleMessageCount();
     }
     const newHeader: TabHeader = {
+      id: this.id,
       title: title ?? '',
       url: this.page.url(),
       current: this.isCurrentTab(),
@@ -322,6 +327,9 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       else
         url = 'https://' + url;
     }
+    const protocol = new URL(url).protocol;
+    if (['chrome:', 'chrome-extension:', 'devtools:', 'edge:'].includes(protocol))
+      throw new Error(`UNSUPPORTED_INTERNAL_PAGE: ${protocol} pages cannot be controlled`);
     this.context.checkUrlAllowed(url);
     await this.navigate(url);
     return url;
@@ -334,7 +342,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
 
     const { promise: downloadEvent, abort: abortDownloadEvent } = eventWaiter<playwright.Download>(this.page, 'download', 3000);
     try {
-      await this.page.goto(url, { waitUntil: 'domcontentloaded', ...this.navigationTimeoutOptions });
+      await this.page.goto(url, { waitUntil: 'commit', ...this.navigationTimeoutOptions });
       abortDownloadEvent();
     } catch (_e: unknown) {
       const e = _e as Error;
@@ -352,8 +360,6 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       return;
     }
 
-    // Cap load event to 5 seconds, the page is operational at this point.
-    await this.waitForLoadState('load', { timeout: 5000 });
   }
 
   async consoleMessageCount(): Promise<{ total: number, errors: number, warnings: number }> {
