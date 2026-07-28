@@ -55,6 +55,7 @@ beforeEach(() => {
       query: spy([
         { id: 7, url: 'https://example.com', title: 'Example' },
         { id: 8, url: 'chrome://settings', title: 'Settings' },
+        { id: 9, url: 'about:blank', title: '' },
       ]),
       get: spy({ id: 7, windowId: 1, url: 'https://example.com', title: 'Example' }),
       update: spy({ id: 9, windowId: 1, url: 'https://example.com' }),
@@ -114,7 +115,10 @@ test('discovers debuggable user tabs only when explicitly requested', async () =
     id: 1,
     method: 'tyrs.tabs.discover',
     params: [],
-  }), [{ id: 7, url: 'https://example.com', title: 'Example', tyrs: {} }]);
+  }), [
+    { id: 7, url: 'https://example.com', title: 'Example', tyrs: {} },
+    { id: 9, url: 'about:blank', title: '', tyrs: {} },
+  ]);
   assert.equal((chrome.tabs.query as any).calls.length, 1);
 });
 

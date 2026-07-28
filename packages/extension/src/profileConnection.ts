@@ -4,13 +4,12 @@
  */
 
 import { RelayConnection } from './relayConnection';
-
-const blockedSchemes = ['chrome:', 'chrome-extension:', 'devtools:', 'edge:', 'about:'];
+import { isDebuggableURL } from './tabUrl';
 
 export function isDebuggable(tab: chrome.tabs.Tab): boolean {
   if (tab.id === undefined || !tab.url)
     return false;
-  return !blockedSchemes.some(scheme => tab.url!.startsWith(scheme));
+  return isDebuggableURL(tab.url);
 }
 
 export class ProfileConnection {

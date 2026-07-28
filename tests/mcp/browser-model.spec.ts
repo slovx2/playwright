@@ -35,3 +35,35 @@ test('discovers and attaches user tabs only when explicitly requested', async ()
   ]);
   expect(commands.filter(command => command.method === 'chrome.debugger.attach')).toHaveLength(2);
 });
+
+test('creates and attaches an about:blank target before navigation', async () => {
+  const commands: Array<{ method: string, params: any }> = [];
+  const events: any[] = [];
+  const model = new BrowserModel(async (method, params) => {
+    commands.push({ method, params });
+    if (method === 'chrome.tabs.create')
+      return { id: 9, url: 'about:blank' };
+    if (method === 'chrome.debugger.sendCommand')
+      return { targetInfo: { targetId: 'target-9', type: 'page', url: 'about:blank' } };
+    return {};
+  });
+  model.connectOverCDP(message => events.push(message));
+
+  await expect(model.createTarget('about:blank')).resolves.toEqual({ targetId: 'target-9' });
+  expect(commands).toEqual([
+    { method: 'chrome.tabs.create', params: [{ url: 'about:blank' }] },
+    { method: 'chrome.debugger.attach', params: [{ tabId: 9 }, '1.3'] },
+    {
+      method: 'chrome.debugger.sendCommand',
+      params: [{ tabId: 9 }, 'Target.getTargetInfo'],
+    },
+  ]);
+  expect(events).toContainEqual({
+    method: 'Target.attachedToTarget',
+    params: {
+      sessionId: 'pw-tab-1',
+      targetInfo: { targetId: 'target-9', type: 'page', url: 'about:blank', attached: true },
+      waitingForDebugger: false,
+    },
+  });
+});

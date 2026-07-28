@@ -9,6 +9,9 @@ export type ProtocolCommand = {
   params?: unknown;
 };
 
+import { SessionController } from './sessionController';
+import { isDebuggableURL } from './tabUrl';
+
 export interface RelayContext {
   readonly attachedTabs: ReadonlySet<number>;
   sendMessage(message: unknown): void;
@@ -167,7 +170,7 @@ export class ProtocolV2Handler {
 function isDiscoverableTab(tab: chrome.tabs.Tab): boolean {
   if (tab.id === undefined || !tab.url)
     return false;
-  return !/^(chrome|chrome-extension|devtools|edge|about):/i.test(tab.url);
+  return isDebuggableURL(tab.url);
 }
 
 export function resolveChromeMember(fullMethod: string): { obj: any, name: string } {
@@ -190,4 +193,3 @@ async function invokeChromeMethod(fullMethod: string, args: unknown[]): Promise<
     throw new Error(`Not a function: ${fullMethod}`);
   return await method.apply(obj, args);
 }
-import { SessionController } from './sessionController';

@@ -18,7 +18,7 @@ test('CDP relay rejects an old profile before it can occupy the extension connec
     capability: process.env.PLAYWRIGHT_MCP_EXTENSION_CAPABILITY_VERSION,
   };
   process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN = 'test-token';
-  process.env.PLAYWRIGHT_MCP_EXTENSION_VERSION = '0.3.2';
+  process.env.PLAYWRIGHT_MCP_EXTENSION_VERSION = '0.3.3';
   process.env.PLAYWRIGHT_EXTENSION_PROTOCOL = '2';
   process.env.PLAYWRIGHT_MCP_EXTENSION_CAPABILITY_VERSION = '1';
 
@@ -37,7 +37,7 @@ test('CDP relay rejects an old profile before it can occupy the extension connec
     expect(await closed).toEqual({ code: 4002, reason: 'Incompatible extension connection' });
 
     const currentProfile = new WebSocket(
-        `${endpoint}?token=test-token&extensionVersion=0.3.2&extensionProtocol=2&capabilityVersion=1`);
+        `${endpoint}?token=test-token&extensionVersion=0.3.3&extensionProtocol=2&capabilityVersion=1`);
     currentProfile.on('message', data => {
       const message = JSON.parse(data.toString());
       currentProfile.send(JSON.stringify({ id: message.id, result: undefined }));

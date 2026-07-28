@@ -61,13 +61,20 @@ test('attaches only popups from controlled tabs and tracks their lifecycle', asy
   assert.equal(didInitialize.calls.length, 1);
 
   created.emit({ id: 4, openerTabId: 1, url: 'https://new.example' });
+  created.emit({ id: 7, openerTabId: 1, url: 'about:blank' });
   created.emit({ id: 6, openerTabId: 99, url: 'https://unrelated.example' });
   created.emit({ id: 5, url: 'chrome-extension://blocked/page.html' });
   updated.emit(4, { status: 'loading' }, { id: 4, url: 'https://new.example' });
+  updated.emit(4, { status: 'complete' }, { id: 4, url: 'about:blank' });
   updated.emit(4, { status: 'complete' }, { id: 4, url: 'https://new.example/done' });
   updated.emit(4, { url: 'chrome://version' }, { id: 4, url: 'chrome://version' });
   removed.emit(4);
-  assert.equal(attachTab.calls.length, 2);
+  assert.deepEqual(attachTab.calls, [
+    [{ id: 4, openerTabId: 1, url: 'https://new.example' }],
+    [{ id: 7, openerTabId: 1, url: 'about:blank' }],
+    [{ id: 4, url: 'about:blank' }],
+    [{ id: 4, url: 'https://new.example/done' }],
+  ]);
   assert.deepEqual(detachTab.calls, [[4], [4]]);
 
   profile.close('bridge disconnected');
@@ -81,9 +88,10 @@ test('attaches only popups from controlled tabs and tracks their lifecycle', asy
 
 test('filters every internal scheme plus tabs without IDs or URLs', () => {
   for (const url of ['chrome://version', 'chrome-extension://id/page', 'devtools://tools',
-    'edge://settings', 'about:blank'])
+    'edge://settings', 'about:srcdoc'])
     assert.equal(isDebuggable({ id: 1, url } as chrome.tabs.Tab), false, url);
-  for (const url of ['https://example.com', 'http://127.0.0.1', 'file:///tmp/result.html'])
+  for (const url of ['https://example.com', 'http://127.0.0.1', 'file:///tmp/result.html',
+    'about:blank', 'about:blank#target'])
     assert.equal(isDebuggable({ id: 1, url } as chrome.tabs.Tab), true, url);
   assert.equal(isDebuggable({ id: 1 } as chrome.tabs.Tab), false);
   assert.equal(isDebuggable({ url: 'https://example.com' } as chrome.tabs.Tab), false);
