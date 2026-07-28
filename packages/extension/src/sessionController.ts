@@ -571,5 +571,9 @@ function normalizeNavigationUrl(value: string | undefined): string {
 }
 
 function isDebuggableURL(value: string | undefined): boolean {
-  return Boolean(value) && !/^(about|chrome|chrome-extension|devtools|edge):/i.test(value!);
+  if (!value)
+    return false;
+  if (/^about:blank(?:[?#].*)?$/i.test(value))
+    return true;
+  return !/^(about|chrome|chrome-extension|devtools|edge):/i.test(value);
 }

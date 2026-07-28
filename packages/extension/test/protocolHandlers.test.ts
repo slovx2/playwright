@@ -98,6 +98,16 @@ test('allows only the fixed command set and records debugger attachment', async 
   assert.deepEqual(remove.calls, [[9]]);
 });
 
+test('preserves about:blank when creating a tab without an active session', async () => {
+  const protocol = handler();
+  await protocol.handleCommand({
+    id: 1,
+    method: 'chrome.tabs.create',
+    params: [{ url: 'about:blank' }],
+  });
+  assert.deepEqual(create.calls, [[{ url: 'about:blank', active: false }]]);
+});
+
 test('discovers debuggable user tabs only when explicitly requested', async () => {
   const protocol = handler();
   assert.deepEqual(await protocol.handleCommand({
