@@ -174,7 +174,7 @@ test('finalize preserves marked agent tabs and their status favicon', async () =
   assert.deepEqual(detach.calls, [[{ tabId: 9 }]]);
   (chrome.tabs.query as any) = spy([
     { id: 7, url: 'https://example.com', title: 'Example' },
-    { id: 9, url: 'https://example.com', title: 'Example' },
+    { id: 9, url: 'https://example.com', title: '' },
   ]);
   assert.deepEqual(await protocol.handleCommand({
     id: 5,
@@ -182,7 +182,7 @@ test('finalize preserves marked agent tabs and their status favicon', async () =
     params: [],
   }), [
     { id: 7, url: 'https://example.com', title: 'Example', tyrs: {} },
-    { id: 9, url: 'https://example.com', title: 'Example', tyrs: {
+    { id: 9, url: 'https://example.com', title: '', tyrs: {
       sessionName: 'Deliverable',
       origin: 'agent',
       disposition: 'deliverable',

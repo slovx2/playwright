@@ -169,7 +169,8 @@ export class SessionController {
       };
     }
     const retained = this._state.retainedTabs[String(tabId)];
-    if (retained && (retained.title !== title || retained.url !== url)) {
+    const retainedTitleChanged = retained?.title && title && retained.title !== title;
+    if (retained && (retained.url !== url || retainedTitleChanged)) {
       delete this._state.retainedTabs[String(tabId)];
       await this._persist();
       return {};
