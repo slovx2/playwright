@@ -163,13 +163,18 @@ test('finalize preserves marked agent tabs and their status favicon', async () =
   await protocol.handleCommand({ id: 3, method: 'tyrs.tab.disposition',
     params: [{ sessionId, disposition: 'deliverable' }] });
   const faviconCalls = (chrome.scripting.executeScript as any).calls.length;
+  (chrome.tabs.get as any) = spy({
+    id: 9,
+    url: 'https://example.com',
+    title: 'Example',
+  });
   await protocol.handleCommand({ id: 4, method: 'tyrs.session.finalize', params: [{ sessionId }] });
   assert.deepEqual(remove.calls, []);
   assert.equal((chrome.scripting.executeScript as any).calls.length, faviconCalls);
   assert.deepEqual(detach.calls, [[{ tabId: 9 }]]);
   (chrome.tabs.query as any) = spy([
     { id: 7, url: 'https://example.com', title: 'Example' },
-    { id: 9, url: 'https://example.com', title: '' },
+    { id: 9, url: 'https://example.com', title: 'Example' },
   ]);
   assert.deepEqual(await protocol.handleCommand({
     id: 5,
@@ -177,7 +182,7 @@ test('finalize preserves marked agent tabs and their status favicon', async () =
     params: [],
   }), [
     { id: 7, url: 'https://example.com', title: 'Example', tyrs: {} },
-    { id: 9, url: 'https://example.com', title: '', tyrs: {
+    { id: 9, url: 'https://example.com', title: 'Example', tyrs: {
       sessionName: 'Deliverable',
       origin: 'agent',
       disposition: 'deliverable',

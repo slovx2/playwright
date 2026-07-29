@@ -303,18 +303,15 @@ export class SessionController {
     const entries = Object.entries(this._state.leases).filter(([, lease]) => lease.sessionId === sessionId);
     for (const [key, lease] of entries) {
       const tabId = Number(key);
+      const retained = await this._retainedTabState(
+          tabId,
+          lease,
+          this._state.sessions[sessionId]?.name || '🌐 Browser task');
       await this._finalizeLease(tabId, lease);
-      if (lease.origin === 'agent' && lease.disposition !== 'omit') {
-        this._state.retainedTabs[key] = {
-          sessionName: this._state.sessions[sessionId]?.name || '🌐 Browser task',
-          origin: 'agent',
-          disposition: lease.disposition,
-          title: lease.title,
-          url: lease.url,
-        };
-      } else {
+      if (retained)
+        this._state.retainedTabs[key] = retained;
+      else
         delete this._state.retainedTabs[key];
-      }
       delete this._state.leases[key];
     }
     delete this._state.sessions[sessionId];
@@ -349,16 +346,16 @@ export class SessionController {
   async stopAll(): Promise<void> {
     await this._ready;
     for (const [key, lease] of Object.entries(this._state.leases)) {
-      await this._finalizeLease(Number(key), lease);
-      if (lease.origin === 'agent' && lease.disposition !== 'omit') {
-        this._state.retainedTabs[key] = {
-          sessionName: this._state.sessions[lease.sessionId]?.name || '🌐 Browser task',
-          origin: 'agent',
-          disposition: lease.disposition,
-          title: lease.title,
-          url: lease.url,
-        };
-      }
+      const tabId = Number(key);
+      const retained = await this._retainedTabState(
+          tabId,
+          lease,
+          this._state.sessions[lease.sessionId]?.name || '🌐 Browser task');
+      await this._finalizeLease(tabId, lease);
+      if (retained)
+        this._state.retainedTabs[key] = retained;
+      else
+        delete this._state.retainedTabs[key];
     }
     this._state.sessions = {};
     this._state.leases = {};
@@ -505,6 +502,25 @@ export class SessionController {
     }
     const keepFavicon = lease.origin === 'agent' && lease.disposition !== 'omit';
     await this._release(tabId, keepFavicon);
+  }
+
+  private async _retainedTabState(
+    tabId: number,
+    lease: LeaseState,
+    sessionName: string,
+  ): Promise<RetainedTabState | undefined> {
+    if (lease.origin !== 'agent' || lease.disposition === 'omit')
+      return;
+    const tab = await chrome.tabs.get(tabId).catch(() => undefined);
+    if (!tab)
+      return;
+    return {
+      sessionName,
+      origin: 'agent',
+      disposition: lease.disposition,
+      title: tab.title || '',
+      url: tab.url || '',
+    };
   }
 
   private _waitForRemoval(tabId: number): Promise<void> {
