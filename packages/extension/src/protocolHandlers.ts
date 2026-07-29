@@ -100,10 +100,10 @@ export class ProtocolV2Handler {
     if (method === 'chrome.tabs.create')
       return await this._sessions.createTab(value);
     if (method === 'tyrs.tabs.discover') {
-      return (await chrome.tabs.query({})).filter(isDiscoverableTab).map(tab => ({
+      return await Promise.all((await chrome.tabs.query({})).filter(isDiscoverableTab).map(async tab => ({
         ...tab,
-        tyrs: this._sessions.describeTab(tab.id!),
-      }));
+        tyrs: await this._sessions.describeTab(tab.id!, tab.title || '', tab.url || ''),
+      })));
     }
     if (method === 'tyrs.tab.claim') {
       return await this._sessions.claimExisting(

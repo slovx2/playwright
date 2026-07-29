@@ -24,9 +24,18 @@ type LeaseState = {
   originalFavIconUrl?: string;
 };
 
+type RetainedTabState = {
+  sessionName: string;
+  origin: 'agent';
+  disposition: Exclude<TabDisposition, 'omit'>;
+  title: string;
+  url: string;
+};
+
 type StoredState = {
   sessions: Record<string, SessionState>;
   leases: Record<string, LeaseState>;
+  retainedTabs: Record<string, RetainedTabState>;
 };
 
 type NavigationIntent = {
@@ -39,7 +48,7 @@ const storageKey = 'tyrsBrowserSessionsV2';
 const cursorScriptId = 'tyrs-browser-cursor-v2';
 
 export class SessionController {
-  private _state: StoredState = { sessions: {}, leases: {} };
+  private _state: StoredState = { sessions: {}, leases: {}, retainedTabs: {} };
   private _activeSessionId = '';
   private _ready: Promise<void>;
   private _closingTabs = new Set<number>();
@@ -143,21 +152,33 @@ export class SessionController {
     return tab;
   }
 
-  describeTab(tabId: number): {
+  async describeTab(tabId: number, title: string, url: string): Promise<{
     sessionId?: string;
     sessionName?: string;
     origin?: 'agent' | 'user';
     disposition?: TabDisposition;
-  } {
+  }> {
+    await this._ready;
     const lease = this._state.leases[String(tabId)];
-    if (!lease)
+    if (lease) {
+      return {
+        sessionId: lease.sessionId,
+        sessionName: this._state.sessions[lease.sessionId]?.name,
+        origin: lease.origin,
+        disposition: lease.disposition,
+      };
+    }
+    const retained = this._state.retainedTabs[String(tabId)];
+    if (retained && (retained.title !== title || retained.url !== url)) {
+      delete this._state.retainedTabs[String(tabId)];
+      await this._persist();
       return {};
-    return {
-      sessionId: lease.sessionId,
-      sessionName: this._state.sessions[lease.sessionId]?.name,
-      origin: lease.origin,
-      disposition: lease.disposition,
-    };
+    }
+    return retained ? {
+      sessionName: retained.sessionName,
+      origin: retained.origin,
+      disposition: retained.disposition,
+    } : {};
   }
 
   async claimExisting(
@@ -199,7 +220,10 @@ export class SessionController {
       ids.forEach(tabId => this._closingTabs.delete(tabId));
       throw error;
     } finally {
-      ids.forEach(tabId => delete this._state.leases[String(tabId)]);
+      ids.forEach(tabId => {
+        delete this._state.leases[String(tabId)];
+        delete this._state.retainedTabs[String(tabId)];
+      });
       await this._persist();
     }
   }
@@ -280,6 +304,17 @@ export class SessionController {
     for (const [key, lease] of entries) {
       const tabId = Number(key);
       await this._finalizeLease(tabId, lease);
+      if (lease.origin === 'agent' && lease.disposition !== 'omit') {
+        this._state.retainedTabs[key] = {
+          sessionName: this._state.sessions[sessionId]?.name || '🌐 Browser task',
+          origin: 'agent',
+          disposition: lease.disposition,
+          title: lease.title,
+          url: lease.url,
+        };
+      } else {
+        delete this._state.retainedTabs[key];
+      }
       delete this._state.leases[key];
     }
     delete this._state.sessions[sessionId];
@@ -307,14 +342,26 @@ export class SessionController {
     }] });
     await this._release(tabId);
     delete this._state.leases[String(tabId)];
+    delete this._state.retainedTabs[String(tabId)];
     await this._persist();
   }
 
   async stopAll(): Promise<void> {
     await this._ready;
-    for (const [key, lease] of Object.entries(this._state.leases))
+    for (const [key, lease] of Object.entries(this._state.leases)) {
       await this._finalizeLease(Number(key), lease);
-    this._state = { sessions: {}, leases: {} };
+      if (lease.origin === 'agent' && lease.disposition !== 'omit') {
+        this._state.retainedTabs[key] = {
+          sessionName: this._state.sessions[lease.sessionId]?.name || '🌐 Browser task',
+          origin: 'agent',
+          disposition: lease.disposition,
+          title: lease.title,
+          url: lease.url,
+        };
+      }
+    }
+    this._state.sessions = {};
+    this._state.leases = {};
     this._activeSessionId = '';
     await this._persist();
     await this._removeCursorScript();
@@ -347,6 +394,7 @@ export class SessionController {
       url: tab.url || '',
       originalFavIconUrl: tab.favIconUrl,
     };
+    delete this._state.retainedTabs[String(tab.id)];
     this._state.sessions[sessionId].currentTabId = tab.id;
     await this._setFavicon(tab.id, 'omit');
     await this._persist();
@@ -536,8 +584,13 @@ export class SessionController {
     agentInitiated: boolean,
     removedLease: LeaseState | undefined,
   ): Promise<void> {
-    if (agentInitiated || !removedLease)
+    if (agentInitiated || !removedLease) {
+      if (this._state.retainedTabs[String(tabId)]) {
+        delete this._state.retainedTabs[String(tabId)];
+        await this._persist();
+      }
       return;
+    }
     if (this._state.leases[String(tabId)] !== removedLease)
       return;
     await this.takeover(tabId, 'tab_closed');
@@ -546,8 +599,13 @@ export class SessionController {
   private async _restore(): Promise<void> {
     const stored = await chrome.storage.session.get(storageKey);
     const value = stored[storageKey] as StoredState | undefined;
-    if (value?.sessions && value?.leases)
-      this._state = value;
+    if (value?.sessions && value?.leases) {
+      this._state = {
+        sessions: value.sessions,
+        leases: value.leases,
+        retainedTabs: value.retainedTabs || {},
+      };
+    }
   }
 
   private async _persist(): Promise<void> {

@@ -167,6 +167,67 @@ test('finalize preserves marked agent tabs and their status favicon', async () =
   assert.deepEqual(remove.calls, []);
   assert.equal((chrome.scripting.executeScript as any).calls.length, faviconCalls);
   assert.deepEqual(detach.calls, [[{ tabId: 9 }]]);
+  (chrome.tabs.query as any) = spy([
+    { id: 7, url: 'https://example.com', title: 'Example' },
+    { id: 9, url: 'https://example.com', title: '' },
+  ]);
+  assert.deepEqual(await protocol.handleCommand({
+    id: 5,
+    method: 'tyrs.tabs.discover',
+    params: [],
+  }), [
+    { id: 7, url: 'https://example.com', title: 'Example', tyrs: {} },
+    { id: 9, url: 'https://example.com', title: '', tyrs: {
+      sessionName: 'Deliverable',
+      origin: 'agent',
+      disposition: 'deliverable',
+    } },
+  ]);
+});
+
+test('waits for retained tab metadata to restore before discovery', async () => {
+  let releaseRestore!: () => void;
+  const restoreGate = new Promise<void>(resolve => releaseRestore = resolve);
+  (chrome.storage.session.get as any) = async () => {
+    await restoreGate;
+    return {
+      tyrsBrowserSessionsV2: {
+        sessions: {},
+        leases: {},
+        retainedTabs: {
+          '9': {
+            sessionName: 'Restored deliverable',
+            origin: 'agent',
+            disposition: 'deliverable',
+            title: '',
+            url: 'about:blank',
+          },
+        },
+      },
+    };
+  };
+  const protocol = handler();
+  const discovery = protocol.handleCommand({
+    id: 1,
+    method: 'tyrs.tabs.discover',
+    params: [],
+  });
+  releaseRestore();
+  const tabs = await discovery as any[];
+  assert.deepEqual(tabs.find(tab => tab.id === 9)?.tyrs, {
+    sessionName: 'Restored deliverable',
+    origin: 'agent',
+    disposition: 'deliverable',
+  });
+  (chrome.tabs.query as any) = spy([
+    { id: 9, url: 'https://changed.example', title: 'Changed' },
+  ]);
+  const recycled = await protocol.handleCommand({
+    id: 2,
+    method: 'tyrs.tabs.discover',
+    params: [],
+  }) as any[];
+  assert.deepEqual(recycled[0].tyrs, {});
 });
 
 test('serializes concurrent debugger input commands per tab', async () => {
