@@ -20,7 +20,8 @@ import { commaSeparatedList, dotenvFileLoader, enumParser, headerParser, numberP
 import { setupExitWatchdog } from './watchdog';
 import { createBrowserWithInfo } from './browserFactory';
 import { BrowserBackend } from '../backend/browserBackend';
-import { browserSelectSchema, RoutingBrowserBackend } from '../backend/routingBrowserBackend';
+import { BrowserServiceManager } from '../backend/browserServiceManager';
+import { browserSelectSchema, browserServiceSchemas, RoutingBrowserBackend } from '../backend/routingBrowserBackend';
 import { filteredTools } from '../backend/tools';
 import { testDebug } from './log';
 import { packageJSON } from '../../package';
@@ -229,12 +230,15 @@ async function startRoutingServer(config: FullConfig, options: any, tools: Tool[
 
   const prewarmClient: ClientInfo = { clientName: 'Tyrs Browser Bridge', cwd: process.cwd(), scope: 'worker' };
   void ensureWorker(prewarmClient).catch(error => testDebug(`failed to prewarm worker browser: ${error}`));
+  const serviceRoot = process.env.TYRS_BROWSER_SERVICES_ROOT || '';
+  const services = new BrowserServiceManager(serviceRoot, registry);
+  registry.onGenerationChanged(scope => void services.closeBrowserScope(scope, 'desktop'));
 
   const factory: mcpServer.ServerBackendFactory = {
     name: 'Playwright',
     nameInConfig: 'playwright',
     version,
-    toolSchemas: [browserSelectSchema, ...tools.map(tool => tool.schema)],
+    toolSchemas: [browserSelectSchema, ...browserServiceSchemas, ...tools.map(tool => tool.schema)],
     create: async (clientInfo: ClientInfo) => new RoutingBrowserBackend({
       worker: async () => createBackend(config, tools, await ensureWorker(clientInfo)),
       desktop: async () => {
@@ -249,7 +253,7 @@ async function startRoutingServer(config: FullConfig, options: any, tools: Tool[
         reason: workerReady || workerPromise ? undefined :
           `Worker browser 进程不可用${workerError ? `：${workerError}` : ''}`,
         version,
-        capabilities: ['local-execution', 'isolated-context', 'downloads', 'snapshot', 'screenshot', 'batch'],
+        capabilities: ['local-execution', 'isolated-context', 'downloads', 'snapshot', 'screenshot', 'batch', 'loopback-service-tunnel'],
       }),
       desktop: () => {
         const status = registry.status(clientInfo.scope);
@@ -259,12 +263,14 @@ async function startRoutingServer(config: FullConfig, options: any, tools: Tool[
           reason: status.available ? undefined :
             (status.reason || 'Desktop Browser Agent 未连接或组件版本不匹配'),
           version: status.agentVersion,
-          capabilities: ['existing-login-state', 'background-tabs', 'virtual-cursor', 'takeover', 'sessions', 'batch'],
+          capabilities: ['existing-login-state', 'background-tabs', 'virtual-cursor', 'takeover', 'sessions', 'batch', 'loopback-service-tunnel'],
         };
       },
-    }),
+    }, services),
     disposed: async () => {},
     health: () => registry.health(),
+    releaseTask: (scope, taskId) => services.releaseTask(scope, taskId),
+    closeScope: scope => services.closeScope(scope),
   };
   await mcpServer.start(factory, config.server);
 }

@@ -14,6 +14,7 @@ import { browserAgentCapabilityVersion, browserAgentMaxChunkSize, browserAgentMa
 import type { BrowserAgentMessage } from './browserAgentProtocol';
 import type * as mcpServer from '../utils/mcp/server';
 import type { ClientInfo, ServerBackend } from '../utils/mcp/server';
+import type { DesktopServiceProvider } from '../backend/browserServiceManager';
 
 const debugLogger = debug('pw:mcp:browser-agent');
 const environmentPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -62,9 +63,10 @@ export type BrowserAgentStatus = {
   tabCount?: number;
 };
 
-export class BrowserAgentRegistry {
+export class BrowserAgentRegistry implements DesktopServiceProvider {
   private readonly _connections = new Map<string, AgentConnection>();
   private readonly _generationListeners = new Set<(scope: string) => void>();
+  private readonly _serviceActivityListeners = new Set<(scope: string, serviceId: string, activeConnections: number) => void>();
   private _agentServer?: net.Server;
 
   constructor(
@@ -112,6 +114,23 @@ export class BrowserAgentRegistry {
     return new RemoteBrowserBackend(connection);
   }
 
+  async openService(scope: string, serviceId: string, targetPort: number): Promise<{ endpointPort: number, close: () => Promise<void> }> {
+    const connection = this._connections.get(scope);
+    if (!connection?.available())
+      throw new Error('桌面端浏览器不可用');
+    const endpointPort = await connection.openService(serviceId, targetPort);
+    return { endpointPort, close: () => this.closeService(scope, serviceId) };
+  }
+
+  async closeService(scope: string, serviceId: string): Promise<void> {
+    await this._connections.get(scope)?.closeService(serviceId);
+  }
+
+  onServiceActivity(listener: (scope: string, serviceId: string, activeConnections: number) => void): () => void {
+    this._serviceActivityListeners.add(listener);
+    return () => this._serviceActivityListeners.delete(listener);
+  }
+
   onGenerationChanged(listener: (scope: string) => void): () => void {
     this._generationListeners.add(listener);
     return () => this._generationListeners.delete(listener);
@@ -144,7 +163,11 @@ export class BrowserAgentRegistry {
           scope,
           framed,
           this._versions,
-          () => this._connectionChanged(scope, connection));
+          () => this._connectionChanged(scope, connection),
+          (serviceId, activeConnections) => {
+            for (const listener of this._serviceActivityListeners)
+              listener(scope, serviceId, activeConnections);
+          });
       this._connections.get(scope)?.close();
       this._connections.set(scope, connection);
       socket.write(browserAgentPreface);
@@ -176,6 +199,11 @@ class AgentConnection {
   private _artifactTransfers = new Map<string, ToolArtifactTransfer>();
   private _completedArtifacts = new Map<string, CompletedToolArtifact>();
   private _pendingCalls = new Map<string, PendingCall>();
+  private _pendingServiceRequests = new Map<string, {
+    resolve: (message: BrowserAgentMessage) => void,
+    reject: (error: Error) => void,
+    timer: NodeJS.Timeout,
+  }>();
   private _sessionWorkspaces = new Map<string, string>();
   private _closed = false;
   private _welcomed = false;
@@ -189,6 +217,7 @@ class AgentConnection {
     private readonly _framed: FramedConnection,
     private readonly _versions: { bridgeVersion: string, agentVersion: string, extensionVersion: string },
     private readonly _onChange: () => void,
+    private readonly _onServiceActivity: (serviceId: string, activeConnections: number) => void,
   ) {}
 
   start(): void {
@@ -287,6 +316,20 @@ class AgentConnection {
     });
   }
 
+  async openService(serviceId: string, targetPort: number): Promise<number> {
+    const response = await this._serviceRequest('service_open', { serviceId, targetPort });
+    const endpointPort = Number(response.endpointPort);
+    if (!Number.isInteger(endpointPort) || endpointPort < 1 || endpointPort > 65535)
+      throw new Error('Browser Agent 返回了无效的服务端口');
+    return endpointPort;
+  }
+
+  async closeService(serviceId: string): Promise<void> {
+    if (this._closed)
+      return;
+    await this._serviceRequest('service_close', { serviceId });
+  }
+
   close(): void {
     if (this._closed)
       return;
@@ -300,6 +343,11 @@ class AgentConnection {
       pending.reject(new Error('Browser Agent disconnected'));
     }
     this._pendingCalls.clear();
+    for (const pending of this._pendingServiceRequests.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('Browser Agent disconnected'));
+    }
+    this._pendingServiceRequests.clear();
     this._artifactTransfers.clear();
     this._completedArtifacts.clear();
     this._framed.close();
@@ -314,7 +362,7 @@ class AgentConnection {
             message.capabilityVersion !== browserAgentCapabilityVersion ||
             message.bridgeVersion !== this._versions.bridgeVersion ||
             !Array.isArray(message.capabilities) ||
-            !['local-tool-execution', 'cancellation', 'sessions', 'artifacts'].every(value => message.capabilities.includes(value)) ||
+            !['local-tool-execution', 'cancellation', 'sessions', 'artifacts', 'service-tunnels'].every(value => message.capabilities.includes(value)) ||
             String(message.agentVersion || '') !== this._versions.agentVersion)
           throw new Error('Incompatible Browser Agent protocol');
         this._welcomed = true;
@@ -322,8 +370,9 @@ class AgentConnection {
         await this._framed.send({ type: 'welcome', protocol: browserAgentProtocolVersion,
           capabilityVersion: browserAgentCapabilityVersion, generation: this.generation,
           bridgeVersion: this._versions.bridgeVersion,
-          capabilities: ['local-tool-execution', 'cancellation', 'sessions', 'artifacts'],
+          capabilities: ['local-tool-execution', 'cancellation', 'sessions', 'artifacts', 'service-tunnels'],
           maxFileBytes: browserAgentMaxFileSize, heartbeatIntervalMs: 15_000 });
+        await this._framed.send({ type: 'service_reset', generation: this.generation });
         break;
       case 'status':
         if (!this._welcomed)
@@ -358,6 +407,12 @@ class AgentConnection {
       case 'session_interrupted':
         this._interruptSession(String(message.sessionId || ''), String(message.reason || 'Browser control was interrupted'));
         break;
+      case 'service_result':
+        this._finishServiceRequest(message);
+        break;
+      case 'service_activity':
+        this._onServiceActivity(String(message.serviceId || ''), Number(message.activeConnections || 0));
+        break;
       case 'download_begin':
         this._beginDownload(message);
         break;
@@ -373,6 +428,42 @@ class AgentConnection {
         debugLogger(`Browser Agent error: ${String(message.message || '')}`);
         break;
     }
+  }
+
+  private async _serviceRequest(type: string, fields: Record<string, unknown>): Promise<BrowserAgentMessage> {
+    if (this._closed || !this.available())
+      throw new Error('桌面端浏览器不可用');
+    const requestId = crypto.randomUUID();
+    return await new Promise(async (resolve, reject) => {
+      const timer = setTimeout(() => {
+        this._pendingServiceRequests.delete(requestId);
+        reject(new Error('Desktop service request timed out'));
+      }, 15_000);
+      this._pendingServiceRequests.set(requestId, { resolve, reject, timer });
+      try {
+        await this._framed.send({ type, requestId, generation: this.generation, ...fields });
+      } catch (error) {
+        const pending = this._pendingServiceRequests.get(requestId);
+        if (pending) {
+          this._pendingServiceRequests.delete(requestId);
+          clearTimeout(timer);
+          reject(error);
+        }
+      }
+    });
+  }
+
+  private _finishServiceRequest(message: BrowserAgentMessage): void {
+    const requestId = String(message.requestId || '');
+    const pending = this._pendingServiceRequests.get(requestId);
+    if (!pending)
+      return;
+    this._pendingServiceRequests.delete(requestId);
+    clearTimeout(pending.timer);
+    if (message.error)
+      pending.reject(new Error(String(message.error)));
+    else
+      pending.resolve(message);
   }
 
   private _finishToolCall(message: BrowserAgentMessage): void {

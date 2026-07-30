@@ -27,9 +27,9 @@ test('Browser Agent registry verifies scoped tokens and atomically receives desk
   const wire = await AgentWire.connect(port, token);
   let replacement: AgentWire | undefined;
   try {
-    await wire.send({ type: 'hello', protocol: 2, capabilityVersion: 1,
+    await wire.send({ type: 'hello', protocol: 2, capabilityVersion: 2,
       bridgeVersion: versions.bridgeVersion, agentVersion: versions.agentVersion,
-      capabilities: ['local-tool-execution', 'cancellation', 'sessions', 'artifacts'] });
+      capabilities: ['local-tool-execution', 'cancellation', 'sessions', 'artifacts', 'service-tunnels'] });
     expect((await wire.next('welcome')).maxFileBytes).toBe(25 * 1024 * 1024);
     await wire.send({ type: 'status', connected: true, tabCount: 3,
       agentVersion: versions.agentVersion, extensionVersion: versions.extensionVersion,
@@ -37,6 +37,26 @@ test('Browser Agent registry verifies scoped tokens and atomically receives desk
     await expect.poll(() => registry.status(scope).available).toBe(true);
     expect(registry.health()).toEqual({ connectedEnvironments: 1, availableEnvironments: 1 });
     expect(registry.status('22222222-2222-4222-8222-222222222222').available).toBe(false);
+    const serviceId = `service-${crypto.randomUUID()}`;
+    const activity: number[] = [];
+    const removeActivity = registry.onServiceActivity((activityScope, id, activeConnections) => {
+      if (activityScope === scope && id === serviceId)
+        activity.push(activeConnections);
+    });
+    const openedPromise = registry.openService(scope, serviceId, 8000);
+    const openRequest = await wire.next('service_open');
+    expect(openRequest).toMatchObject({ serviceId, targetPort: 8000 });
+    await wire.send({ type: 'service_result', requestId: openRequest.requestId,
+      serviceId, endpointPort: 49152 });
+    const openedService = await openedPromise;
+    expect(openedService.endpointPort).toBe(49152);
+    await wire.send({ type: 'service_activity', serviceId, activeConnections: 1 });
+    await expect.poll(() => activity).toEqual([1]);
+    const closePromise = openedService.close();
+    const closeRequest = await wire.next('service_close');
+    await wire.send({ type: 'service_result', requestId: closeRequest.requestId, serviceId });
+    await closePromise;
+    removeActivity();
     const downloadsPath = testInfo.outputPath('downloads');
     expect(() => registry.createBackend('22222222-2222-4222-8222-222222222222')).toThrow('桌面端浏览器不可用');
     const backend = registry.createBackend(scope);
@@ -78,9 +98,9 @@ test('Browser Agent registry verifies scoped tokens and atomically receives desk
 
     replacement = await AgentWire.connect(port, token);
     await wire.closed;
-    await replacement.send({ type: 'hello', protocol: 2, capabilityVersion: 1,
+    await replacement.send({ type: 'hello', protocol: 2, capabilityVersion: 2,
       bridgeVersion: versions.bridgeVersion, agentVersion: versions.agentVersion,
-      capabilities: ['local-tool-execution', 'cancellation', 'sessions', 'artifacts'] });
+      capabilities: ['local-tool-execution', 'cancellation', 'sessions', 'artifacts', 'service-tunnels'] });
     await replacement.next('welcome');
     await replacement.send({ type: 'status', connected: true, agentVersion: versions.agentVersion,
       extensionVersion: versions.extensionVersion, extensionProtocol: 2 });
@@ -102,9 +122,9 @@ test('Browser Agent registry reassembles tool artifacts and discards late transf
   await registry.start('127.0.0.1', port);
   const wire = await AgentWire.connect(port, token);
   try {
-    await wire.send({ type: 'hello', protocol: 2, capabilityVersion: 1,
+    await wire.send({ type: 'hello', protocol: 2, capabilityVersion: 2,
       bridgeVersion: versions.bridgeVersion, agentVersion: versions.agentVersion,
-      capabilities: ['local-tool-execution', 'cancellation', 'sessions', 'artifacts'] });
+      capabilities: ['local-tool-execution', 'cancellation', 'sessions', 'artifacts', 'service-tunnels'] });
     await wire.next('welcome');
     await wire.send({ type: 'status', connected: true, agentVersion: versions.agentVersion,
       extensionVersion: versions.extensionVersion, extensionProtocol: 2 });

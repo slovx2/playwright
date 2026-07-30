@@ -63,7 +63,7 @@ async function installHttpTransport(httpServer: http.Server, serverBackendFactor
   allowedHosts = (allowedHosts || [host]).map(h => h.toLowerCase());
   const allowAnyHost = allowedHosts.includes('*');
 
-  const sseSessions = new Map<string, { transport: SSEServerTransportType, scope: string }>();
+  const sseSessions = new Map<string, { transport: SSEServerTransportType, scope: string, taskId?: string }>();
   const streamableSessions = new Map();
   httpServer.on('request', async (req, res) => {
     if (!allowAnyHost) {
@@ -106,21 +106,41 @@ async function installHttpTransport(httpServer: http.Server, serverBackendFactor
         'cache-control': 'no-store' });
       return res.end(data);
     }
-    const scope = requestScope(req);
-    if (!scope) {
+    const client = requestClient(req);
+    if (!client) {
       res.statusCode = 400;
       return res.end('Invalid browser scope');
     }
+    if (url.pathname === '/browser-services/task/end') {
+      if (req.method !== 'POST' || !client.taskId || !serverBackendFactory.releaseTask) {
+        res.statusCode = 400;
+        return res.end('Invalid task service cleanup request');
+      }
+      await serverBackendFactory.releaseTask(client.scope, client.taskId);
+      res.statusCode = 204;
+      return res.end();
+    }
+    if (url.pathname === '/browser-services/environment/end') {
+      if (req.method !== 'POST' || client.scope === 'worker' || !serverBackendFactory.closeScope) {
+        res.statusCode = 400;
+        return res.end('Invalid environment service cleanup request');
+      }
+      await serverBackendFactory.closeScope(client.scope);
+      res.statusCode = 204;
+      return res.end();
+    }
     if (url.pathname.startsWith('/sse'))
-      await handleSSE(serverBackendFactory, req, res, url, sseSessions, scope);
+      await handleSSE(serverBackendFactory, req, res, url, sseSessions, client);
     else
-      await handleStreamable(serverBackendFactory, req, res, streamableSessions, scope);
+      await handleStreamable(serverBackendFactory, req, res, streamableSessions, client);
   });
 
   return url;
 }
 
-async function handleSSE(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, url: URL, sessions: Map<string, { transport: SSEServerTransportType, scope: string }>, scope: string) {
+type RequestClient = { scope: string, taskId?: string };
+
+async function handleSSE(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, url: URL, sessions: Map<string, { transport: SSEServerTransportType, scope: string, taskId?: string }>, client: RequestClient) {
   if (req.method === 'POST') {
     const sessionId = url.searchParams.get('sessionId');
     if (!sessionId) {
@@ -133,7 +153,7 @@ async function handleSSE(serverBackendFactory: ServerBackendFactory, req: http.I
       res.statusCode = 404;
       return res.end('Session not found');
     }
-    if (sessionInfo.scope !== scope) {
+    if (sessionInfo.scope !== client.scope || sessionInfo.taskId !== client.taskId) {
       res.statusCode = 403;
       return res.end('MCP session belongs to another browser scope');
     }
@@ -141,9 +161,9 @@ async function handleSSE(serverBackendFactory: ServerBackendFactory, req: http.I
     return await sessionInfo.transport.handlePostMessage(req, res);
   } else if (req.method === 'GET') {
     const transport = new SSEServerTransport('/sse', res);
-    sessions.set(transport.sessionId, { transport, scope });
+    sessions.set(transport.sessionId, { transport, ...client });
     testDebug(`create SSE session`);
-    await mcpServer.connect(serverBackendFactory, transport, Promise.resolve(), false, scope);
+    await mcpServer.connect(serverBackendFactory, transport, Promise.resolve(), false, client.scope, client.taskId);
     res.on('close', () => {
       testDebug(`delete SSE session`);
       sessions.delete(transport.sessionId);
@@ -155,7 +175,7 @@ async function handleSSE(serverBackendFactory: ServerBackendFactory, req: http.I
   res.end('Method not allowed');
 }
 
-async function handleStreamable(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, sessions: Map<string, { transport: StreamableHTTPServerTransportType, transportInitialized: ManualPromise<void>, scope: string }>, scope: string) {
+async function handleStreamable(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, sessions: Map<string, { transport: StreamableHTTPServerTransportType, transportInitialized: ManualPromise<void>, scope: string, taskId?: string }>, client: RequestClient) {
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
   if (sessionId) {
     const sessionInfo = sessions.get(sessionId);
@@ -164,7 +184,7 @@ async function handleStreamable(serverBackendFactory: ServerBackendFactory, req:
       res.end('Session not found');
       return;
     }
-    if (sessionInfo.scope !== scope) {
+    if (sessionInfo.scope !== client.scope || sessionInfo.taskId !== client.taskId) {
       res.statusCode = 403;
       res.end('MCP session belongs to another browser scope');
       return;
@@ -183,11 +203,11 @@ async function handleStreamable(serverBackendFactory: ServerBackendFactory, req:
       sessionIdGenerator: () => crypto.randomUUID(),
       onsessioninitialized: async sessionId => {
         testDebug(`create http session`);
-        const sessionInfo = { transport, transportInitialized: new ManualPromise<void>(), scope };
+        const sessionInfo = { transport, transportInitialized: new ManualPromise<void>(), ...client };
         // Only give the client 5 seconds to reach for the event stream.
         setTimeout(() => sessionInfo.transportInitialized.resolve(), 5000);
         sessions.set(sessionId, sessionInfo);
-        await mcpServer.connect(serverBackendFactory, sessionInfo.transport, sessionInfo.transportInitialized, true, scope);
+        await mcpServer.connect(serverBackendFactory, sessionInfo.transport, sessionInfo.transportInitialized, true, client.scope, client.taskId);
       }
     });
 
@@ -206,11 +226,18 @@ async function handleStreamable(serverBackendFactory: ServerBackendFactory, req:
   res.end('Invalid request');
 }
 
-function requestScope(req: http.IncomingMessage): string | undefined {
+function requestClient(req: http.IncomingMessage): RequestClient | undefined {
   const value = req.headers['x-tyrs-browser-scope'];
-  if (typeof value !== 'string' || !value)
-    return 'worker';
-  if (value === 'worker' || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value))
-    return value.toLowerCase();
-  return undefined;
+  const scope = typeof value !== 'string' || !value ? 'worker' : value.toLowerCase();
+  if (scope !== 'worker' && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(scope))
+    return undefined;
+  const taskValue = req.headers['x-tyrs-browser-task-id'];
+  if (taskValue !== undefined && (typeof taskValue !== 'string' ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(taskValue)))
+    return undefined;
+  if (scope === 'worker' && taskValue)
+    return { scope, taskId: taskValue.toLowerCase() };
+  if (scope !== 'worker')
+    return { scope, taskId: typeof taskValue === 'string' ? taskValue.toLowerCase() : undefined };
+  return { scope };
 }

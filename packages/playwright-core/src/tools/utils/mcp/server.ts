@@ -37,6 +37,7 @@ export type ClientInfo = {
   cwd: string;
   clientName: string;
   scope: string;
+  taskId?: string;
 };
 
 class BackendManager {
@@ -75,14 +76,16 @@ export type ServerBackendFactory = {
   create: (clientInfo: ClientInfo) => Promise<ServerBackend>;
   disposed: (backend: ServerBackend) => Promise<void>;
   health?: () => unknown;
+  releaseTask?: (scope: string, taskId: string) => Promise<void>;
+  closeScope?: (scope: string) => Promise<void>;
 };
 
-export async function connect(factory: ServerBackendFactory, transport: Transport, transportInitialized: Promise<void>, runHeartbeat: boolean, scope = 'worker') {
-  const server = createServer(factory.name, factory.version, factory, transportInitialized, runHeartbeat, scope);
+export async function connect(factory: ServerBackendFactory, transport: Transport, transportInitialized: Promise<void>, runHeartbeat: boolean, scope = 'worker', taskId?: string) {
+  const server = createServer(factory.name, factory.version, factory, transportInitialized, runHeartbeat, scope, taskId);
   await server.connect(transport);
 }
 
-export function createServer(name: string, version: string, factory: ServerBackendFactory, transportInitialized: Promise<void>, runHeartbeat: boolean, scope = 'worker'): ServerType {
+export function createServer(name: string, version: string, factory: ServerBackendFactory, transportInitialized: Promise<void>, runHeartbeat: boolean, scope = 'worker', taskId?: string): ServerType {
   const server = new Server({ name, version }, {
     capabilities: {
       tools: {},
@@ -104,7 +107,7 @@ export function createServer(name: string, version: string, factory: ServerBacke
 
     try {
       if (!backendPromise) {
-        backendPromise = initializeServer(server, factory, transportInitialized, runHeartbeat, scope).catch(e => {
+        backendPromise = initializeServer(server, factory, transportInitialized, runHeartbeat, scope, taskId).catch(e => {
           backendPromise = undefined;
           throw e;
         });
@@ -131,7 +134,7 @@ export function createServer(name: string, version: string, factory: ServerBacke
   return server;
 }
 
-const initializeServer = async (server: ServerType, factory: ServerBackendFactory, transportInitialized: Promise<void>, runHeartbeat: boolean, scope: string): Promise<ServerBackend> => {
+const initializeServer = async (server: ServerType, factory: ServerBackendFactory, transportInitialized: Promise<void>, runHeartbeat: boolean, scope: string, taskId?: string): Promise<ServerBackend> => {
   const capabilities = server.getClientCapabilities();
   let clientRoots: Root[] = [];
   if (capabilities?.roots) {
@@ -147,6 +150,7 @@ const initializeServer = async (server: ServerType, factory: ServerBackendFactor
     cwd: firstRootPath(clientRoots),
     clientName: server.getClientVersion()?.name ?? 'Playwright MCP',
     scope,
+    taskId,
   };
 
   const backend = await backendManager.createBackend(factory, clientInfo);
