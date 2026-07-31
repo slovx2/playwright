@@ -207,6 +207,9 @@ async function handleStreamable(serverBackendFactory: ServerBackendFactory, req:
   if (req.method === 'POST') {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
+      // Codex 0.145 会丢失 tools/call POST 中延迟到达的首个 SSE 事件。
+      // 直接返回 JSON，确保长时间工具调用始终和原请求关联。
+      enableJsonResponse: true,
       onsessioninitialized: async sessionId => {
         testDebug(`create http session`);
         const sessionInfo = { transport, transportInitialized: new ManualPromise<void>(), ...client };

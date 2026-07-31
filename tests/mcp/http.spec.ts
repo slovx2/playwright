@@ -85,6 +85,37 @@ test('http transport', async ({ serverEndpoint }) => {
   await client.ping();
 });
 
+test('http transport returns a delayed tool result as JSON', async ({ serverEndpoint, server }) => {
+  const { url } = await serverEndpoint();
+  const postContentTypes: string[] = [];
+  const transport = new StreamableHTTPClientTransport(new URL('/mcp', url), {
+    fetch: async (input, init) => {
+      const response = await fetch(input, init);
+      if (init?.method === 'POST')
+        postContentTypes.push(response.headers.get('content-type') || '');
+      return response;
+    },
+  });
+  const client = new Client({ name: 'delayed tool test', version: '1.0.0' });
+  await client.connect(transport);
+  await client.callTool({ name: 'browser_navigate', arguments: { url: server.HELLO_WORLD } });
+
+  postContentTypes.length = 0;
+  const startedAt = performance.now();
+  const result = await client.callTool({
+    name: 'browser_wait_for',
+    arguments: { condition: { kind: 'delay', delayMs: 8500 }, timeoutMs: 15000 },
+  });
+  const elapsedMs = performance.now() - startedAt;
+
+  expect(result.isError).not.toBe(true);
+  expect(elapsedMs).toBeGreaterThanOrEqual(8000);
+  expect(elapsedMs).toBeLessThan(13000);
+  expect(postContentTypes).toContainEqual(expect.stringContaining('application/json'));
+  await transport.terminateSession();
+  await client.close();
+});
+
 test('http transport pins each MCP session to its browser scope', async ({ serverEndpoint }) => {
   const { url } = await serverEndpoint();
   const environmentScope = '11111111-1111-4111-8111-111111111111';
