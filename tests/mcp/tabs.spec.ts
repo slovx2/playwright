@@ -180,6 +180,41 @@ test('agent-owned context finalizes omit tabs idempotently and retains deliverab
   await context.dispose();
 });
 
+test('retained tab disposition and stable id survive backend recreation', async ({ cdpServer }, testInfo) => {
+  const browserContext = await cdpServer.start();
+  const first = new Context(browserContext as any, {
+    config: { defaultTabOrigin: 'agent' },
+    cwd: testInfo.outputPath(),
+  });
+  await first.refreshTabs();
+
+  const deliverable = await first.newTab();
+  await deliverable.page.goto('data:text/html,<title>Deliverable retained</title>');
+  first.markTab(deliverable.id, 'deliverable');
+  const handoff = await first.newTab();
+  await handoff.page.goto('data:text/html,<title>Handoff retained</title>');
+  first.markTab(handoff.id, 'handoff');
+  const omitted = await first.newTab();
+  await omitted.page.goto('data:text/html,<title>Omitted closed</title>');
+
+  await first.finalizeTabs();
+  await first.dispose();
+  expect(omitted.page.isClosed()).toBeTruthy();
+
+  const second = new Context(browserContext as any, {
+    config: { defaultTabOrigin: 'agent' },
+    cwd: testInfo.outputPath(),
+  });
+  await second.refreshTabs();
+  const restoredDeliverable = second.tabById(deliverable.id);
+  const restoredHandoff = second.tabById(handoff.id);
+  expect(second.tabState(restoredDeliverable)).toEqual({ origin: 'agent', disposition: 'deliverable' });
+  expect(second.tabState(restoredHandoff)).toEqual({ origin: 'agent', disposition: 'handoff' });
+  await second.closeTab(deliverable.id);
+  await second.closeTab(handoff.id);
+  await second.dispose();
+});
+
 test('user tab claim tokens are single-use, list-scoped, page-bound, and expiring', async ({ cdpServer }, testInfo) => {
   const browserContext = await cdpServer.start();
   const context = new Context(browserContext as any, {

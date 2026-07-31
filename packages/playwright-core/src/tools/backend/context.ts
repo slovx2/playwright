@@ -96,6 +96,8 @@ type VideoParams = { size?: { width: number; height: number } };
 export type TabOrigin = 'agent' | 'user';
 export type TabDisposition = 'omit' | 'deliverable' | 'handoff';
 export type ManagedTabState = { origin: TabOrigin, disposition: TabDisposition };
+const managedTabStates = new WeakMap<playwrightTypes.Page, ManagedTabState>();
+const managedPageIds = new WeakMap<playwrightTypes.Page, string>();
 type TabClaim = {
   page: playwrightTypes.Page;
   title: string;
@@ -112,7 +114,6 @@ export class Context {
   private _tabs: Tab[] = [];
   private _currentTab: Tab | undefined;
   private _tabStates = new Map<Tab, ManagedTabState>();
-  private _pageIds = new WeakMap<playwrightTypes.Page, string>();
   private _tabClaims = new Map<string, TabClaim>();
   private _creatingPage = false;
   private _sessionName = '🌐 Browser task';
@@ -193,7 +194,7 @@ export class Context {
     if (!this._tabs.some(tab => tab.page === page))
       this._onPageCreated(page);
     this._currentTab = this._tabs.find(t => t.page === page)!;
-    this._tabStates.set(this._currentTab, { origin: 'agent', disposition: 'omit' });
+    this._setTabState(this._currentTab, { origin: 'agent', disposition: 'omit' });
     return this._currentTab;
   }
 
@@ -232,7 +233,7 @@ export class Context {
       throw new Error('Claimed tab changed after it was listed; list tabs again');
     this._onPageCreated(claim.page, { origin: 'user', disposition: 'omit' });
     const tab = this._tabs.find(candidate => candidate.page === claim.page)!;
-    this._tabStates.set(tab, { origin: 'user', disposition: 'omit' });
+    this._setTabState(tab, { origin: 'user', disposition: 'omit' });
     this._currentTab = tab;
     return tab;
   }
@@ -264,7 +265,7 @@ export class Context {
     const state = this.tabState(tab);
     if (state.origin !== 'agent')
       throw new Error('User-origin tabs cannot be marked deliverable or handoff');
-    this._tabStates.set(tab, { ...state, disposition });
+    this._setTabState(tab, { ...state, disposition });
     return tab;
   }
 
@@ -356,7 +357,7 @@ export class Context {
       return;
     const tab = new Tab(this, page, tab => this._onPageClosed(tab), this._pageId(page));
     this._tabs.push(tab);
-    this._tabStates.set(tab, state ?? {
+    this._setTabState(tab, state ?? managedTabStates.get(page) ?? {
       origin: this.config.defaultTabOrigin ?? 'user',
       disposition: 'omit',
     });
@@ -380,12 +381,17 @@ export class Context {
   }
 
   private _pageId(page: playwrightTypes.Page): string {
-    let id: string | undefined = this._pageIds.get(page);
+    let id: string | undefined = managedPageIds.get(page);
     if (!id) {
       id = crypto.randomUUID();
-      this._pageIds.set(page, id);
+      managedPageIds.set(page, id);
     }
     return id;
+  }
+
+  private _setTabState(tab: Tab, state: ManagedTabState): void {
+    this._tabStates.set(tab, state);
+    managedTabStates.set(tab.page, state);
   }
 
   private _onPageClosed(tab: Tab) {
@@ -394,6 +400,8 @@ export class Context {
       return;
     this._tabs.splice(index, 1);
     this._tabStates.delete(tab);
+    managedTabStates.delete(tab.page);
+    managedPageIds.delete(tab.page);
 
     if (this._currentTab === tab)
       this._currentTab = this._tabs[Math.min(index, this._tabs.length - 1)];
