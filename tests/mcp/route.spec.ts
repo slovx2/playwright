@@ -51,7 +51,7 @@ test('browser_route mocks response with JSON body', async ({ client, server }) =
   // Wait for the mocked response to be rendered
   await client.callTool({
     name: 'browser_wait_for',
-    arguments: { text: 'Alice' },
+    arguments: { condition: { kind: 'text', text: 'Alice', state: 'visible' } },
   });
 
   // Verify the mocked response was used
@@ -90,7 +90,7 @@ test('browser_route mocks response with custom status', async ({ client, server 
   // Wait for the status to be rendered
   await client.callTool({
     name: 'browser_wait_for',
-    arguments: { text: 'Status: 404' },
+    arguments: { condition: { kind: 'text', text: 'Status: 404', state: 'visible' } },
   });
 
   expect(await client.callTool({

@@ -65,6 +65,8 @@ export type ContextConfig = {
   };
   skillMode?: boolean;
   isolatedTabs?: boolean;
+  protectSensitiveData?: boolean;
+  defaultTabOrigin?: TabOrigin;
 };
 
 type ContextOptions = {
@@ -94,6 +96,12 @@ type VideoParams = { size?: { width: number; height: number } };
 export type TabOrigin = 'agent' | 'user';
 export type TabDisposition = 'omit' | 'deliverable' | 'handoff';
 export type ManagedTabState = { origin: TabOrigin, disposition: TabDisposition };
+type TabClaim = {
+  page: playwrightTypes.Page;
+  title: string;
+  url: string;
+  expiresAt: number;
+};
 
 export class Context {
   readonly config: ContextConfig;
@@ -105,6 +113,7 @@ export class Context {
   private _currentTab: Tab | undefined;
   private _tabStates = new Map<Tab, ManagedTabState>();
   private _pageIds = new WeakMap<playwrightTypes.Page, string>();
+  private _tabClaims = new Map<string, TabClaim>();
   private _creatingPage = false;
   private _sessionName = '🌐 Browser task';
   private _routes: RouteEntry[] = [];
@@ -188,10 +197,8 @@ export class Context {
     return this._currentTab;
   }
 
-  async selectTab(index: number) {
-    const tab = this._tabs[index];
-    if (!tab)
-      throw new Error(`Tab ${index} not found`);
+  async selectTab(id: string) {
+    const tab = this.tabById(id);
     this._currentTab = tab;
     return tab;
   }
@@ -214,48 +221,49 @@ export class Context {
     return this._tabStates.get(tab) ?? { origin: 'user', disposition: 'omit' };
   }
 
-  async claimTab(id: string, expectedTitle: string, expectedURL: string): Promise<Tab> {
-    let tab = this._tabs.find(candidate => candidate.id === id);
-    if (!tab && this.config.isolatedTabs) {
-      const page = this._rawBrowserContext.pages().find(candidate =>
-        !this._tabs.some(existing => existing.page === candidate) && this._pageId(candidate) === id);
-      if (page) {
-        this._onPageCreated(page);
-        tab = this._tabs.find(candidate => candidate.page === page);
-      }
-    }
-    if (!tab)
-      throw new Error(`Tab ${id} not found`);
-    if (tab.page.url() !== expectedURL)
-      throw new Error('Tab URL changed after it was listed');
-    if (await tab.page.title() !== expectedTitle)
-      throw new Error('Tab title changed after it was listed');
+  async claimTab(claimToken: string): Promise<Tab> {
+    const claim = this._tabClaims.get(claimToken);
+    this._tabClaims.delete(claimToken);
+    if (!claim || claim.expiresAt < Date.now())
+      throw new Error('Claim token is invalid or expired; list tabs again');
+    if (this._tabs.some(existing => existing.page === claim.page) || claim.page.isClosed())
+      throw new Error('Claimed tab is no longer available; list tabs again');
+    if (claim.page.url() !== claim.url || await claim.page.title() !== claim.title)
+      throw new Error('Claimed tab changed after it was listed; list tabs again');
+    this._onPageCreated(claim.page, { origin: 'user', disposition: 'omit' });
+    const tab = this._tabs.find(candidate => candidate.page === claim.page)!;
     this._tabStates.set(tab, { origin: 'user', disposition: 'omit' });
     this._currentTab = tab;
     return tab;
   }
 
-  async availableTabs(): Promise<Array<TabHeader & { changed: boolean } & ManagedTabState>> {
+  async availableTabs(): Promise<Array<Omit<TabHeader, 'id'> & { claimToken: string }>> {
+    this._tabClaims.clear();
     if (!this.config.isolatedTabs)
       return [];
     const pages = this._rawBrowserContext.pages().filter(page =>
       !this._tabs.some(tab => tab.page === page) && !isInternalPage(page.url()));
-    return await Promise.all(pages.map(async page => ({
-      id: this._pageId(page),
-      title: await page.title().catch(() => ''),
-      url: page.url(),
-      current: false,
-      crashed: false,
-      console: { total: 0, warnings: 0, errors: 0 },
-      changed: false,
-      origin: 'user' as const,
-      disposition: 'omit' as const,
-    })));
+    return await Promise.all(pages.map(async page => {
+      const claimToken = crypto.randomUUID();
+      const title = await page.title().catch(() => '');
+      const url = page.url();
+      this._tabClaims.set(claimToken, { page, title, url, expiresAt: Date.now() + 30_000 });
+      return {
+        claimToken,
+        title,
+        url,
+        current: false,
+        crashed: false,
+        console: { total: 0, warnings: 0, errors: 0 },
+      };
+    }));
   }
 
   markTab(id: string | undefined, disposition: Exclude<TabDisposition, 'omit'>): Tab {
     const tab = id ? this.tabById(id) : this.currentTabOrDie();
     const state = this.tabState(tab);
+    if (state.origin !== 'agent')
+      throw new Error('User-origin tabs cannot be marked deliverable or handoff');
     this._tabStates.set(tab, { ...state, disposition });
     return tab;
   }
@@ -292,10 +300,10 @@ export class Context {
     return this._currentTab!;
   }
 
-  async closeTab(index: number | undefined): Promise<string> {
-    const tab = index === undefined ? this._currentTab : this._tabs[index];
-    if (!tab)
-      throw new Error(`Tab ${index} not found`);
+  async closeTab(id: string): Promise<string> {
+    const tab = this.tabById(id);
+    if (this.tabState(tab).origin !== 'agent')
+      throw new Error('User-origin tabs cannot be closed by the agent');
     const url = tab.page.url();
     await tab.page.close();
     return url;
@@ -343,24 +351,31 @@ export class Context {
     await page.screencast.start({ path: fileName, ...this._video.params });
   }
 
-  private _onPageCreated(page: playwrightTypes.Page) {
+  private _onPageCreated(page: playwrightTypes.Page, state?: ManagedTabState) {
     if (this._tabs.some(tab => tab.page === page))
       return;
     const tab = new Tab(this, page, tab => this._onPageClosed(tab), this._pageId(page));
     this._tabs.push(tab);
-    this._tabStates.set(tab, { origin: 'user', disposition: 'omit' });
+    this._tabStates.set(tab, state ?? {
+      origin: this.config.defaultTabOrigin ?? 'user',
+      disposition: 'omit',
+    });
     if (!this._currentTab)
       this._currentTab = tab;
     this._startPageVideo(page).catch(() => {});
   }
 
   private async _considerPageCreated(page: playwrightTypes.Page): Promise<void> {
-    if (!this.config.isolatedTabs || this._creatingPage) {
+    if (this._creatingPage) {
       this._onPageCreated(page);
       return;
     }
     const opener = await page.opener().catch(() => null);
-    if (opener && this._tabs.some(tab => tab.page === opener))
+    if (opener && this._tabs.some(tab => tab.page === opener)) {
+      this._onPageCreated(page, { origin: 'agent', disposition: 'omit' });
+      return;
+    }
+    if (!this.config.isolatedTabs)
       this._onPageCreated(page);
   }
 
@@ -443,6 +458,11 @@ export class Context {
     return this._browserContextPromise;
   }
 
+  async refreshTabs(): Promise<void> {
+    const browserContext = await this.ensureBrowserContext();
+    await Promise.all(browserContext.pages().map(page => this._considerPageCreated(page)));
+  }
+
   private async _initializeBrowserContext() {
     if (this.config.testIdAttribute)
       playwright.selectors.setTestIdAttribute(this.config.testIdAttribute);
@@ -486,8 +506,25 @@ export class Context {
         continue;
       text = text.replaceAll(secretValue, `<secret>${secretName}</secret>`);
     }
-    return text;
+    return this.config.protectSensitiveData ? redactSensitiveData(text) : text;
   }
+}
+
+const sensitiveKey = '(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|api[-_]?key|secret|token|password|passwd|session[-_]?(?:id|key|token))';
+
+export function redactSensitiveData(text: string): string {
+  text = text.replace(/(https?:\/\/[^\s/:@]+:)[^\s/@]+@/gi, '$1<redacted>@');
+  text = text.replace(new RegExp(`^([ \\t]*${sensitiveKey}[ \\t]*:)[^\\r\\n]*$`, 'gim'), '$1 <redacted>');
+  text = text.replace(new RegExp(`(["']${sensitiveKey}["']\\s*:\\s*)(["'][^"']*["']|[^,}\\r\\n]+)`, 'gim'), '$1"<redacted>"');
+  text = text.replace(new RegExp(`(^|[?&;\\s])(${sensitiveKey})=([^&#;\\s]*)`, 'gim'), '$1$2=<redacted>');
+  text = text.replace(/<input\b[^>]*>/gi, input => {
+    if (!/\btype\s*=\s*(["']?)password\1/i.test(input))
+      return input;
+    if (/\bvalue\s*=/i.test(input))
+      return input.replace(/\bvalue\s*=\s*(?:["'][^"']*["']|[^\s>]+)/i, 'value="<redacted>"');
+    return input;
+  });
+  return text;
 }
 
 function originOrHostGlob(originOrHost: string) {

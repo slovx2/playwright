@@ -124,9 +124,9 @@ test('tab-new creates a new tab and returns tab list', async ({ cli, server }) =
   await cli('open', server.HELLO_WORLD);
   const { output } = await cli('--json', 'tab-new');
   const parsed = JSON.parse(output);
-  expect(parsed.result.split('\n')).toEqual([
-    `- 0: [Title](${server.HELLO_WORLD})`,
-    '- 1: (current) [](about:blank)',
+  expect(JSON.parse(parsed.result).controlledTabs).toEqual([
+    expect.objectContaining({ title: 'Title', url: server.HELLO_WORLD, current: false }),
+    expect.objectContaining({ title: '', url: 'about:blank', current: true }),
   ]);
 });
 
@@ -135,19 +135,21 @@ test('tab-list lists all tabs', async ({ cli, server }) => {
   await cli('tab-new');
   const { output } = await cli('--json', 'tab-list');
   const parsed = JSON.parse(output);
-  expect(parsed.result.split('\n')).toEqual([
-    `- 0: [Title](${server.HELLO_WORLD})`,
-    '- 1: (current) [](about:blank)',
+  const tabs = JSON.parse(parsed.result).controlledTabs;
+  expect(tabs).toEqual([
+    expect.objectContaining({ title: 'Title', url: server.HELLO_WORLD, current: false }),
+    expect.objectContaining({ title: '', url: 'about:blank', current: true }),
   ]);
 });
 
 test('tab-close closes a tab and returns remaining tabs', async ({ cli, server }) => {
   await cli('open', server.HELLO_WORLD);
-  await cli('tab-new');
-  const { output } = await cli('--json', 'tab-close');
+  const created = await cli('--json', 'tab-new');
+  const createdTabs = JSON.parse(JSON.parse(created.output).result).controlledTabs;
+  const { output } = await cli('--json', 'tab-close', createdTabs[1].tabId);
   const parsed = JSON.parse(output);
-  expect(parsed.result.split('\n')).toEqual([
-    `- 0: (current) [Title](${server.HELLO_WORLD})`,
+  expect(JSON.parse(parsed.result).controlledTabs).toEqual([
+    expect.objectContaining({ title: 'Title', url: server.HELLO_WORLD, current: true }),
   ]);
 });
 

@@ -5,6 +5,8 @@
 
 import { test, expect } from './fixtures';
 import { RoutingBrowserBackend } from '../../packages/playwright-core/src/tools/backend/routingBrowserBackend';
+import { redactSensitiveData } from '../../packages/playwright-core/src/tools/backend/context';
+import { readsSensitiveBrowserState } from '../../packages/playwright-core/src/tools/backend/evaluate';
 
 test('browser selection is session scoped and routes subsequent calls', async () => {
   const calls: string[] = [];
@@ -107,4 +109,82 @@ test('concurrent calls share one session backend per selected browser', async ()
     routing.callTool('browser_tabs', { action: 'list' }),
   ]);
   expect(factories).toBe(1);
+});
+
+test('dispose finalizes every initialized browser backend', async () => {
+  const calls: string[] = [];
+  const makeBackend = (id: string) => ({
+    initialize: async () => {},
+    dispose: async () => { calls.push(`${id}:dispose`); },
+    callTool: async (name: string, args: any) => {
+      calls.push(`${id}:${name}:${args.action || ''}`);
+      return { content: [{ type: 'text' as const, text: '{}' }] };
+    },
+  });
+  const routing = new RoutingBrowserBackend({
+    worker: async () => makeBackend('worker') as any,
+    desktop: async () => makeBackend('desktop') as any,
+  }, {
+    worker: () => ({ available: true, label: 'worker' }),
+    desktop: () => ({ available: true, label: 'desktop' }),
+  });
+  await routing.initialize({ cwd: process.cwd(), clientName: 'test', scope: 'environment', taskId: 'task' });
+  await routing.callTool('browser_snapshot', {});
+  await routing.callTool('browser_select', { browser: 'desktop' });
+  await routing.callTool('browser_snapshot', {});
+  await routing.dispose();
+  expect(calls).toContain('worker:browser_tabs:finalize');
+  expect(calls).toContain('desktop:browser_tabs:finalize');
+  expect(calls).toContain('worker:dispose');
+  expect(calls).toContain('desktop:dispose');
+});
+
+test('recoverable timeout preserves the selected backend', async () => {
+  let factories = 0;
+  let calls = 0;
+  const routing = new RoutingBrowserBackend({
+    worker: async () => {
+      factories++;
+      return { initialize: async () => {}, dispose: async () => {}, callTool: async () => {
+        if (!calls++)
+          throw new Error('Desktop browser tool timed out');
+        return { content: [{ type: 'text' as const, text: 'recovered' }] };
+      } } as any;
+    },
+    desktop: async () => { throw new Error('must not be called'); },
+  }, {
+    worker: () => ({ available: true, label: 'worker' }),
+    desktop: () => ({ available: false, label: 'desktop' }),
+  });
+  await routing.initialize({ cwd: process.cwd(), clientName: 'test', scope: 'worker' });
+  const failed = await routing.callTool('browser_snapshot', {});
+  expect(failed.isError).toBeTruthy();
+  expect(failed.content[0].type === 'text' && failed.content[0].text).toContain('"sessionPreserved": true');
+  const recovered = await routing.callTool('browser_snapshot', {});
+  expect(recovered.isError).toBeFalsy();
+  expect(factories).toBe(1);
+});
+
+test('Tyrs browser output redacts credentials and password HTML', () => {
+  const redacted = redactSensitiveData([
+    'Authorization: Bearer abc',
+    'Set-Cookie: sid=secret',
+    'https://example.com/?api_key=abc&name=visible',
+    '{"token":"abc","name":"visible"}',
+    '<input type="password" value="abc"><input value="visible">',
+  ].join('\n'));
+  expect(redacted).not.toContain('Bearer abc');
+  expect(redacted).not.toContain('sid=secret');
+  expect(redacted).not.toContain('api_key=abc');
+  expect(redacted).not.toContain('"token":"abc"');
+  expect(redacted).not.toContain('type="password" value="abc"');
+  expect(redacted).toContain('name=visible');
+  expect(redacted).toContain('"name":"visible"');
+  expect(redacted).toContain('<input value="visible">');
+  expect(readsSensitiveBrowserState('() => document.cookie')).toBeTruthy();
+  expect(readsSensitiveBrowserState('() => document["cookie"]')).toBeTruthy();
+  expect(readsSensitiveBrowserState('() => localStorage.getItem("token")')).toBeTruthy();
+  expect(readsSensitiveBrowserState('() => navigator["credentials"].get()')).toBeTruthy();
+  expect(readsSensitiveBrowserState('() => document.querySelector("input[type=password]").value')).toBeTruthy();
+  expect(readsSensitiveBrowserState('() => document.title')).toBeFalsy();
 });

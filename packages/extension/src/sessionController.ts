@@ -67,6 +67,7 @@ export class SessionController {
       const lease = this._state.leases[String(tabId)];
       void this._onTabRemoved(tabId, agentInitiated, lease);
     });
+    chrome.tabs.onCreated.addListener(tab => void this._onTabCreated(tab));
     chrome.tabs.onUpdated.addListener((tabId, change) => {
       if (change.url)
         void this._onTabUpdated(tabId);
@@ -212,6 +213,9 @@ export class SessionController {
 
   async removeTabs(tabIds: number | number[]): Promise<void> {
     const ids = Array.isArray(tabIds) ? tabIds : [tabIds];
+    const userTab = ids.find(tabId => this._state.leases[String(tabId)]?.origin === 'user');
+    if (userTab !== undefined)
+      throw new Error('User-origin tabs cannot be closed by the agent');
     const removed = ids.map(tabId => this._waitForRemoval(tabId));
     ids.forEach(tabId => this._closingTabs.add(tabId));
     try {
@@ -280,6 +284,8 @@ export class SessionController {
       throw new Error('Browser session does not control a tab');
     if (this._state.leases[String(tabId)]?.sessionId !== sessionId)
       throw new Error('Tab is not leased by this browser session');
+    if (this._state.leases[String(tabId)].origin !== 'agent')
+      throw new Error('User-origin tabs cannot be marked deliverable or handoff');
     this._state.leases[String(tabId)].disposition = disposition;
     await this._setFavicon(tabId, disposition);
     await this._persist();
@@ -575,6 +581,20 @@ export class SessionController {
     }
     await this._setFavicon(tabId, lease.disposition);
     await this._persist();
+  }
+
+  private async _onTabCreated(tab: chrome.tabs.Tab): Promise<void> {
+    if (tab.id === undefined || tab.openerTabId === undefined)
+      return;
+    await this._ready;
+    const openerLease = this._state.leases[String(tab.openerTabId)];
+    if (!openerLease || !this._state.sessions[openerLease.sessionId])
+      return;
+    const existing = this._state.leases[String(tab.id)];
+    if (existing)
+      return;
+    await this._claim(tab, openerLease.sessionId, 'agent');
+    await this._group(tab.id, openerLease.sessionId);
   }
 
   private async _onCommittedNavigation(details: chrome.webNavigation.WebNavigationTransitionCallbackDetails):

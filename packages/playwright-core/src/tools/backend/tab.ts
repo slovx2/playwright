@@ -464,31 +464,39 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     await this._raceAgainstModalStates(() => waitForCompletion(this, callback));
   }
 
-  async targetLocator(params: { element?: string, target: string }): Promise<{ locator: playwright.Locator, resolved: string }> {
+  async targetLocator(params: { element?: string, target: string, allowMissing?: boolean }): Promise<{ locator: playwright.Locator, resolved: string }> {
     await this._initializedPromise;
     return (await this.targetLocators([params]))[0];
   }
 
-  async targetLocators(params: { element?: string, target: string }[]): Promise<{ locator: playwright.Locator, resolved: string }[]> {
+  async targetLocators(params: { element?: string, target: string, allowMissing?: boolean }[]): Promise<{ locator: playwright.Locator, resolved: string }[]> {
     await this._initializedPromise;
     return Promise.all(params.map(async param => {
       if (!param.target.match(/^(f\d+)?e\d+$/)) {
         const selector = locatorOrSelectorAsSelector('javascript', param.target, this.context.config.testIdAttribute || 'data-testid');
-        const handle = await this.page.$(selector);
-        if (!handle)
+        const locator = this.page.locator(selector);
+        const count = await locator.count();
+        if (!count && !param.allowMissing)
           throw new Error(`"${param.target}" does not match any elements.`);
-        handle.dispose().catch(() => {});
-        return { locator: this.page.locator(selector), resolved: asLocator('javascript', selector) };
+        if (count > 1)
+          throw new Error(`"${param.target}" matches ${count} elements; use a unique target.`);
+        return { locator, resolved: asLocator('javascript', selector) };
       } else {
+        let locator = this.page.locator(`aria-ref=${param.target}`);
+        if (param.element)
+          locator = locator.describe(param.element);
+        let resolved: playwright.Locator;
         try {
-          let locator = this.page.locator(`aria-ref=${param.target}`);
-          if (param.element)
-            locator = locator.describe(param.element);
-          const resolved = await locator.normalize();
-          return { locator, resolved: resolved.toString() };
+          resolved = await locator.normalize();
         } catch (e) {
+          if (param.allowMissing)
+            return { locator, resolved: `locator('aria-ref=${param.target}')` };
           throw new Error(`Ref ${param.target} not found in the current page snapshot. Try capturing new snapshot.`);
         }
+        const count = await locator.count();
+        if (count > 1)
+          throw new Error(`Ref ${param.target} matches ${count} elements; capture a new snapshot.`);
+        return { locator, resolved: resolved.toString() };
       }
     }));
   }

@@ -55,6 +55,7 @@ test('browser_fill_form (textbox)', async ({ client, server }) => {
     name: 'browser_navigate',
     arguments: { url: server.PREFIX },
   });
+  await client.callTool({ name: 'browser_snapshot' });
 
   expect(await client.callTool({
     name: 'browser_fill_form',
@@ -119,5 +120,33 @@ await page.getByRole('checkbox', { name: 'Subscribe to newsletter' }).setChecked
   });
   expect.soft(response).toHaveResponse({
     inlineSnapshot: expect.stringContaining('checkbox \"Subscribe to newsletter\" [checked]'),
+  });
+});
+
+test('browser_fill_form validates every target before writing', async ({ client, server }) => {
+  server.setContent('/', `
+    <input aria-label="First">
+    <input aria-label="Second" class="duplicate">
+    <input aria-label="Third" class="duplicate">
+  `, 'text/html');
+  await client.callTool({ name: 'browser_navigate', arguments: { url: server.PREFIX } });
+  await client.callTool({ name: 'browser_snapshot' });
+
+  const result = await client.callTool({
+    name: 'browser_fill_form',
+    arguments: {
+      fields: [
+        { name: 'First', type: 'textbox', target: 'e2', value: 'must-not-be-written' },
+        { name: 'Ambiguous', type: 'textbox', target: '.duplicate', value: 'value' },
+      ],
+    },
+  });
+  expect(result.isError).toBeTruthy();
+  expect(result.content.find(item => item.type === 'text')?.text).toContain('matches 2 elements');
+  expect(await client.callTool({
+    name: 'browser_evaluate',
+    arguments: { function: '() => document.querySelector("input").value' },
+  })).toHaveResponse({
+    result: expect.stringContaining('""'),
   });
 });

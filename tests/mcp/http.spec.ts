@@ -121,6 +121,24 @@ test('http transport rejects a forged browser scope', async ({ serverEndpoint })
   expect(response.status).toBe(400);
 });
 
+test('task end disposes backends for the exact scope and task', async ({ serverEndpoint, server }) => {
+  const { url, stderr } = await serverEndpoint();
+  const taskId = '22222222-2222-4222-8222-222222222222';
+  const headers = { 'x-tyrs-browser-scope': 'worker', 'x-tyrs-browser-task-id': taskId };
+  const transport = new StreamableHTTPClientTransport(new URL('/mcp', url), {
+    requestInit: { headers },
+  });
+  const client = new Client({ name: 'task cleanup', version: '1.0.0' });
+  await client.connect(transport);
+  await client.callTool({ name: 'browser_navigate', arguments: { url: server.HELLO_WORLD } });
+
+  const ended = await fetch(new URL('/browser-services/task/end', url), { method: 'POST', headers });
+  expect(ended.status).toBe(204);
+  await expect.poll(() => stderr()).toContain('close browser');
+  await transport.terminateSession();
+  await client.close();
+});
+
 test('http transport (config)', async ({ serverEndpoint }) => {
   const config: Config = {
     server: {

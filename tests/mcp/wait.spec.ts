@@ -31,11 +31,12 @@ test('browser_wait_for(text)', async ({ client, server }) => {
     </body>
   `, 'text/html');
 
-  expect(await client.callTool({
+  await client.callTool({
     name: 'browser_navigate',
     arguments: { url: server.PREFIX },
-  })).toHaveResponse({
-    snapshot: expect.stringContaining(`- generic [ref=e3]: Text to disappear`),
+  });
+  expect(await client.callTool({ name: 'browser_snapshot' })).toHaveResponse({
+    inlineSnapshot: expect.stringContaining(`- generic [ref=e3]: Text to disappear`),
   });
 
   await client.callTool({
@@ -48,7 +49,7 @@ test('browser_wait_for(text)', async ({ client, server }) => {
 
   await client.callTool({
     name: 'browser_wait_for',
-    arguments: { text: 'Text to appear' },
+    arguments: { condition: { kind: 'text', text: 'Text to appear', state: 'visible' } },
   });
 
   expect(await client.callTool({
@@ -73,11 +74,12 @@ test('browser_wait_for(textGone)', async ({ client, server }) => {
     </body>
   `, 'text/html');
 
-  expect(await client.callTool({
+  await client.callTool({
     name: 'browser_navigate',
     arguments: { url: server.PREFIX },
-  })).toHaveResponse({
-    snapshot: expect.stringContaining(`- generic [ref=e3]: Text to disappear`),
+  });
+  expect(await client.callTool({ name: 'browser_snapshot' })).toHaveResponse({
+    inlineSnapshot: expect.stringContaining(`- generic [ref=e3]: Text to disappear`),
   });
 
   await client.callTool({
@@ -90,7 +92,7 @@ test('browser_wait_for(textGone)', async ({ client, server }) => {
 
   await client.callTool({
     name: 'browser_wait_for',
-    arguments: { textGone: 'Text to disappear' },
+    arguments: { condition: { kind: 'text', text: 'Text to disappear', state: 'hidden' } },
   });
 
   expect(await client.callTool({
@@ -110,8 +112,36 @@ test('browser_wait_for(time)', async ({ client, server }) => {
 
   expect(await client.callTool({
     name: 'browser_wait_for',
-    arguments: { time: 1 },
+    arguments: { condition: { kind: 'delay', delayMs: 1000 } },
   })).toHaveResponse({
-    code: `await new Promise(f => setTimeout(f, 1 * 1000));`,
+    result: expect.stringContaining('"waited": true'),
   });
+});
+
+test('browser_wait_for URL, locator, and response conditions', async ({ client, server }) => {
+  server.setContent('/', `
+    <div id="status">Loading</div>
+    <script>
+      setTimeout(async () => {
+        await fetch('/ready');
+        document.querySelector('#status').hidden = true;
+        location.hash = 'done';
+      }, 300);
+    </script>
+  `, 'text/html');
+  server.setContent('/ready', 'ready', 'text/plain');
+  await client.callTool({ name: 'browser_navigate', arguments: { url: server.PREFIX } });
+
+  expect(await client.callTool({
+    name: 'browser_wait_for',
+    arguments: { condition: { kind: 'response', url: '**/ready', status: 200 }, timeoutMs: 2000 },
+  })).toHaveResponse({ result: expect.stringContaining('"waited": true') });
+  expect(await client.callTool({
+    name: 'browser_wait_for',
+    arguments: { condition: { kind: 'locator', target: '#status', state: 'hidden' }, timeoutMs: 2000 },
+  })).toHaveResponse({ result: expect.stringContaining('"waited": true') });
+  expect(await client.callTool({
+    name: 'browser_wait_for',
+    arguments: { condition: { kind: 'url', value: `${server.PREFIX}/#done`, match: 'exact' }, timeoutMs: 2000 },
+  })).toHaveResponse({ result: expect.stringContaining('"waited": true') });
 });

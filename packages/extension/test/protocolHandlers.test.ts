@@ -27,6 +27,7 @@ let remove: ReturnType<typeof spy>;
 let runtimeMessage: ReturnType<typeof eventMock>;
 let tabsUpdated: ReturnType<typeof eventMock>;
 let tabsRemoved: ReturnType<typeof eventMock>;
+let tabsCreated: ReturnType<typeof eventMock>;
 let navigationCommitted: ReturnType<typeof eventMock>;
 
 beforeEach(() => {
@@ -46,6 +47,7 @@ beforeEach(() => {
   runtimeMessage = eventMock();
   tabsUpdated = eventMock();
   tabsRemoved = eventMock();
+  tabsCreated = eventMock();
   navigationCommitted = eventMock();
   globalThis.chrome = {
     debugger: { attach, detach, sendCommand },
@@ -63,6 +65,7 @@ beforeEach(() => {
       sendMessage: spy({ ok: true }),
       onRemoved: tabsRemoved,
       onUpdated: tabsUpdated,
+      onCreated: tabsCreated,
     },
     tabGroups: { update: spy() },
     windows: { get: spy({ focused: true }), update: spy() },
@@ -134,6 +137,29 @@ test('claims an existing tab with fail-closed title and URL validation', async (
       /title changed/i);
 });
 
+test('treats a popup opened by a controlled tab as agent-owned', async () => {
+  const protocol = handler();
+  const sessionId = '11111111-1111-4111-8111-111111111111';
+  await protocol.handleCommand({ id: 1, method: 'tyrs.session.open',
+    params: [{ sessionId, name: 'Popup', bootstrapUrl }] });
+  await protocol.handleCommand({ id: 2, method: 'tyrs.tab.claim',
+    params: [{ sessionId, tabId: 7, title: 'Example', url: 'https://example.com' }] });
+
+  tabsCreated.emit({ id: 10, openerTabId: 7, windowId: 1, url: 'https://example.org', title: 'Popup' });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  (chrome.tabs.query as any) = spy([
+    { id: 7, url: 'https://example.com', title: 'Example' },
+    { id: 10, url: 'https://example.org', title: 'Popup' },
+  ]);
+  const discovered = await protocol.handleCommand({ id: 3, method: 'tyrs.tabs.discover', params: [] }) as any[];
+  assert.deepEqual(discovered[1].tyrs, {
+    sessionId,
+    sessionName: 'Popup',
+    origin: 'agent',
+    disposition: 'omit',
+  });
+});
+
 test('resets persisted sessions before a new executor takes control', async () => {
   const protocol = handler();
   await protocol.handleCommand({ id: 1, method: 'tyrs.session.open',
@@ -152,6 +178,18 @@ test('finalize closes unmarked agent tabs as a disconnect fallback', async () =>
   await protocol.handleCommand({ id: 2, method: 'chrome.tabs.create', params: [{}] });
   await protocol.handleCommand({ id: 3, method: 'tyrs.session.finalize', params: [{ sessionId }] });
   assert.deepEqual(remove.calls, [[9]]);
+});
+
+test('finalize releases but never closes a claimed user tab', async () => {
+  const protocol = handler();
+  const sessionId = '11111111-1111-4111-8111-111111111111';
+  await protocol.handleCommand({ id: 1, method: 'tyrs.session.open',
+    params: [{ sessionId, name: 'User tab', bootstrapUrl }] });
+  await protocol.handleCommand({ id: 2, method: 'tyrs.tab.claim',
+    params: [{ sessionId, tabId: 7, title: 'Example', url: 'https://example.com' }] });
+  await protocol.handleCommand({ id: 3, method: 'tyrs.session.finalize', params: [{ sessionId }] });
+  assert.deepEqual(remove.calls, []);
+  assert.deepEqual(detach.calls, [[{ tabId: 7 }]]);
 });
 
 test('finalize preserves marked agent tabs and their status favicon', async () => {

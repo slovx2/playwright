@@ -30,6 +30,8 @@ const find = defineTabTool({
     inputSchema: z.object({
       text: z.string().optional().describe('Plain text to search for in the page snapshot (case-insensitive substring match). Provide either text or regex, not both.'),
       regex: z.string().optional().refine(v => !v || isValidRegex(v), { message: 'Invalid regular expression' }).describe('Regular expression to search for in the page snapshot. Matching is case-sensitive by default; wrap the pattern in slashes to add flags, e.g. "/error/i" for case-insensitive. Provide either text or regex, not both.'),
+      exact: z.boolean().optional().default(false).describe('For text search, require a case-insensitive whole-line match.'),
+      limit: z.number().int().min(1).max(100).optional().default(20).describe('Maximum number of matches to return.'),
     }),
     type: 'readOnly',
   },
@@ -56,7 +58,7 @@ const find = defineTabTool({
     } else {
       query = `"${params.text}"`;
       const needle = params.text!.toLowerCase();
-      matches = line => line.toLowerCase().includes(needle);
+      matches = line => params.exact ? line.trim().toLowerCase() === needle : line.toLowerCase().includes(needle);
     }
 
     const snapshot = await tab.page.ariaSnapshot({ mode: 'ai' });
@@ -74,16 +76,12 @@ const find = defineTabTool({
     }
 
     // Merge matched lines into windows of context, coalescing overlapping ones.
-    const windows: { start: number, end: number }[] = [];
-    for (const line of matchedLines) {
-      const start = Math.max(0, line - contextLines);
-      const end = Math.min(lines.length - 1, line + contextLines);
-      const last = windows[windows.length - 1];
-      if (last && start <= last.end + 1)
-        last.end = Math.max(last.end, end);
-      else
-        windows.push({ start, end });
-    }
+    const returnedLines = matchedLines.slice(0, params.limit);
+    const windows = returnedLines.map(line => ({
+      start: Math.max(0, line - contextLines),
+      end: Math.min(lines.length - 1, line + contextLines),
+      match: line,
+    }));
 
     const path = new Set<number>();
     for (const match of matchedLines) {
@@ -103,10 +101,23 @@ const find = defineTabTool({
           out.push(' '.repeat(indents[index]) + '...');
         out.push(lines[index]);
       }
-      return out.join('\n');
+      const snippet = out.join('\n');
+      return {
+        line: window.match + 1,
+        refs: [...snippet.matchAll(/\b(?:ref=)?((?:f\d+)?e\d+)\b/g)].map(match => match[1]),
+        snippet,
+      };
     });
     const matchWord = matchedLines.length === 1 ? 'match' : 'matches';
-    response.addTextResult(`Found ${matchedLines.length} ${matchWord} for ${query}:\n\n${snippets.join('\n\n----\n\n')}`);
+    const structured = JSON.stringify({
+      query,
+      total: matchedLines.length,
+      returned: returnedLines.length,
+      truncated: matchedLines.length > returnedLines.length,
+      matches: snippets,
+    }, null, 2);
+    response.addTextResult(`Found ${matchedLines.length} ${matchWord} for ${query}:\n\n` +
+      `${snippets.map(match => match.snippet).join('\n\n----\n\n')}\n\nStructured matches:\n${structured}`);
   },
 });
 

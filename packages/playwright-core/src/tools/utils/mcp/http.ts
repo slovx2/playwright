@@ -112,13 +112,19 @@ async function installHttpTransport(httpServer: http.Server, serverBackendFactor
       return res.end('Invalid browser scope');
     }
     if (url.pathname === '/browser-services/task/end') {
-      if (req.method !== 'POST' || !client.taskId || !serverBackendFactory.releaseTask) {
+      if (req.method !== 'POST' || !client.taskId) {
         res.statusCode = 400;
         return res.end('Invalid task service cleanup request');
       }
-      await serverBackendFactory.releaseTask(client.scope, client.taskId);
-      res.statusCode = 204;
-      return res.end();
+      try {
+        await mcpServer.disposeTaskBackends(serverBackendFactory, client.scope, client.taskId);
+        await serverBackendFactory.releaseTask?.(client.scope, client.taskId);
+        res.statusCode = 204;
+        return res.end();
+      } catch {
+        res.statusCode = 500;
+        return res.end('Task cleanup failed');
+      }
     }
     if (url.pathname === '/browser-services/environment/end') {
       if (req.method !== 'POST' || client.scope === 'worker' || !serverBackendFactory.closeScope) {

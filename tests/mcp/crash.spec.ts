@@ -17,6 +17,10 @@
 import { utils } from '../../packages/playwright-core/lib/coreBundle';
 import { test, expect, parseResponse, consoleEntries } from './fixtures';
 
+function tabsResult(response: any): any {
+  return JSON.parse(parseResponse(response).result!);
+}
+
 test.describe('crash recovery', () => {
   test.skip(({ mcpBrowser }) => mcpBrowser !== 'chromium' && mcpBrowser !== 'chrome', 'chrome://crash is chromium-specific');
   test.skip(utils.hostPlatform.startsWith('ubuntu24.04'), 'never dispatches the crash event');
@@ -56,12 +60,15 @@ test.describe('crash recovery', () => {
       arguments: { url: 'chrome://crash' },
     });
 
-    expect(await client.callTool({
+    const listed = tabsResult(await client.callTool({
       name: 'browser_tabs',
       arguments: { action: 'list' },
-    })).toHaveResponse({
-      result: `- 0: (current) [](about:blank)`,
-    });
+    }));
+    expect(listed.controlledTabs).toHaveLength(1);
+    expect(listed.controlledTabs[0]).toEqual(expect.objectContaining({
+      current: true,
+      crashed: true,
+    }));
   });
 
   test('marks non-current crashed tab in the tab list', async ({ client, server }) => {
@@ -69,16 +76,24 @@ test.describe('crash recovery', () => {
       name: 'browser_tabs',
       arguments: { action: 'new', url: 'chrome://crash' },
     });
-    await client.callTool({
-      name: 'browser_tabs',
-      arguments: { action: 'select', index: 0 },
-    });
-
-    expect(await client.callTool({
+    const listed = await client.callTool({
       name: 'browser_tabs',
       arguments: { action: 'list' },
-    })).toHaveResponse({
-      result: `- 0: (current) [Title](${server.HELLO_WORLD})\n- 1: [](about:blank) [crashed]`,
     });
+    const text = listed.content.find(item => item.type === 'text')?.text || '';
+    const payload = JSON.parse(text.match(/### Result\n([\s\S]*?)(?:\n### |$)/)![1]);
+    await client.callTool({
+      name: 'browser_tabs',
+      arguments: { action: 'select', tabId: payload.controlledTabs[0].tabId },
+    });
+
+    const result = tabsResult(await client.callTool({
+      name: 'browser_tabs',
+      arguments: { action: 'list' },
+    }));
+    expect(result.controlledTabs).toEqual([
+      expect.objectContaining({ current: true, title: 'Title', url: server.HELLO_WORLD, crashed: false }),
+      expect.objectContaining({ current: false, crashed: true }),
+    ]);
   });
 });

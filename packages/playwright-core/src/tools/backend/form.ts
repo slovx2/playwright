@@ -38,8 +38,25 @@ const fillForm = defineTabTool({
   },
 
   handle: async (tab, params, response) => {
-    for (const field of params.fields) {
-      const { locator, resolved } = await tab.targetLocator({ element: field.name, target: field.target });
+    const targets = await tab.targetLocators(params.fields.map(field => ({
+      element: field.name,
+      target: field.target,
+    })));
+    await Promise.all(params.fields.map(async (field, index) => {
+      const locator = targets[index].locator;
+      const control = await locator.evaluate(element => ({
+        tag: element.tagName.toLowerCase(),
+        type: element instanceof HTMLInputElement ? element.type.toLowerCase() : '',
+        role: element.getAttribute('role')?.toLowerCase() || '',
+        contentEditable: element instanceof HTMLElement && element.isContentEditable,
+        options: element instanceof HTMLSelectElement ? [...element.options].map(option => option.label) : [],
+      }));
+      validateField(field, control);
+    }));
+
+    for (let index = 0; index < params.fields.length; index++) {
+      const field = params.fields[index];
+      const { locator, resolved } = targets[index];
       const locatorSource = `await page.${resolved}`;
       if (field.type === 'textbox' || field.type === 'slider') {
         const secret = tab.context.lookupSecret(field.value);
@@ -55,6 +72,47 @@ const fillForm = defineTabTool({
     }
   },
 });
+
+type Field = {
+  name: string;
+  type: 'textbox' | 'checkbox' | 'radio' | 'combobox' | 'slider';
+  value: string;
+};
+
+type Control = {
+  tag: string;
+  type: string;
+  role: string;
+  contentEditable: boolean;
+  options: string[];
+};
+
+function validateField(field: Field, control: Control): void {
+  const actual = control.role || control.type || control.tag;
+  if (field.type === 'textbox') {
+    const supported = control.tag === 'textarea' || control.contentEditable || control.role === 'textbox' ||
+      (control.tag === 'input' && !['checkbox', 'radio', 'range', 'button', 'submit'].includes(control.type));
+    if (!supported)
+      throw new Error(`${field.name} is ${actual}, not a textbox`);
+    return;
+  }
+  if (field.type === 'checkbox' || field.type === 'radio') {
+    if (!['true', 'false'].includes(field.value))
+      throw new Error(`${field.name} requires value "true" or "false"`);
+    if (control.type !== field.type && control.role !== field.type)
+      throw new Error(`${field.name} is ${actual}, not a ${field.type}`);
+    return;
+  }
+  if (field.type === 'slider') {
+    if (control.type !== 'range' && control.role !== 'slider')
+      throw new Error(`${field.name} is ${actual}, not a slider`);
+    return;
+  }
+  if (control.tag !== 'select' && control.role !== 'combobox')
+    throw new Error(`${field.name} is ${actual}, not a combobox`);
+  if (control.tag === 'select' && !control.options.includes(field.value))
+    throw new Error(`${field.name} does not contain option "${field.value}"`);
+}
 
 export default [
   fillForm,

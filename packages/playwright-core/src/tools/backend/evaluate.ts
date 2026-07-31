@@ -40,6 +40,10 @@ const evaluate = defineTabTool({
   handle: async (tab, params, response) => {
     let locator: Awaited<ReturnType<Tab['targetLocator']>> | undefined;
     const expression = params.function;
+    if (tab.context.config.protectSensitiveData && readsSensitiveBrowserState(expression)) {
+      response.addError('Evaluation cannot read cookies, web storage, browser credentials, or password input values.');
+      return;
+    }
     if (params.target)
       locator = await tab.targetLocator({ target: params.target, element: params.element || 'element' });
 
@@ -74,6 +78,10 @@ const evaluate = defineTabTool({
     });
   },
 });
+
+export function readsSensitiveBrowserState(expression: string): boolean {
+  return /\bdocument\s*(?:\.\s*cookie\b|\[\s*["']cookie["']\s*\])|\b(?:localStorage|sessionStorage|PasswordCredential)\b|\bnavigator\s*(?:\.\s*credentials\b|\[\s*["']credentials["']\s*\])|\b(?:window|globalThis)\s*\[\s*["'](?:localStorage|sessionStorage)["']\s*\]|type\s*=\s*["']?password/i.test(expression);
+}
 
 export default [
   evaluate,

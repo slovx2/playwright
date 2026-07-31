@@ -240,7 +240,11 @@ async function startRoutingServer(config: FullConfig, options: any, tools: Tool[
     version,
     toolSchemas: [browserSelectSchema, ...browserServiceSchemas, ...tools.map(tool => tool.schema)],
     create: async (clientInfo: ClientInfo) => new RoutingBrowserBackend({
-      worker: async () => createBackend(config, tools, await ensureWorker(clientInfo)),
+      worker: async () => createBackend({
+        ...config,
+        protectSensitiveData: true,
+        defaultTabOrigin: 'agent',
+      }, tools, await ensureWorker(clientInfo)),
       desktop: async () => {
         if (clientInfo.scope === 'worker')
           throw new Error('worker scope 不能访问桌面端浏览器');
@@ -275,7 +279,10 @@ async function startRoutingServer(config: FullConfig, options: any, tools: Tool[
   await mcpServer.start(factory, config.server);
 }
 
-function createBackend(config: FullConfig, tools: Tool[], browser: playwright.Browser): BrowserBackend {
+function createBackend(config: FullConfig & {
+  protectSensitiveData?: boolean;
+  defaultTabOrigin?: 'agent' | 'user';
+}, tools: Tool[], browser: playwright.Browser): BrowserBackend {
   const browserContext = browser.contexts()[0];
   if (!browserContext)
     throw new Error('浏览器没有可用的上下文');

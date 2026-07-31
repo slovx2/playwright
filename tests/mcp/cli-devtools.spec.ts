@@ -219,11 +219,15 @@ test('video-start-stop', async ({ cli, server }) => {
   const { output: videoStartOutput } = await cli('video-start', 'recordings/video.webm', '--size=400x300');
   expect(videoStartOutput).toContain('Video recording started.');
   const { output: tabNewOutput } = await cli('tab-new');
-  expect(tabNewOutput).toContain('1: (current) [](about:blank)');
+  const created = JSON.parse(tabNewOutput.match(/### Result\n([\s\S]*)/)![1]);
+  expect(created.controlledTabs[1]).toEqual(expect.objectContaining({ current: true, url: 'about:blank' }));
   await cli('goto', server.EMPTY_PAGE);
-  await cli('tab-select', '0');
-  const { output: tabCloseOutput } = await cli('tab-close');
-  expect(tabCloseOutput).toContain(`0: (current) [](${server.EMPTY_PAGE})`);
+  await cli('tab-select', created.controlledTabs[0].tabId);
+  const { output: tabCloseOutput } = await cli('tab-close', created.controlledTabs[0].tabId);
+  const remaining = JSON.parse(tabCloseOutput.match(/### Result\n([\s\S]*)/)![1]);
+  expect(remaining.controlledTabs).toEqual([
+    expect.objectContaining({ current: true, url: server.EMPTY_PAGE }),
+  ]);
   const { output: videoStopOutput } = await cli('video-stop');
   expect(videoStopOutput).toContain(`### Result\n- [Video](recordings${path.sep}video.webm)\n- [Video](recordings${path.sep}video-1.webm)`);
 });

@@ -48,7 +48,9 @@ test('browser_batch runs structured actions, keeps explicit observations, and bl
         { name: 'browser_snapshot', arguments: {} },
         { name: 'browser_type', arguments: { element: 'Name', target: 'e2', text: 'Tyrs' } },
         { name: 'browser_click', arguments: { element: 'Submit', target: 'e3' } },
-        { name: 'browser_wait_for', arguments: { text: 'Tyrs' } },
+        { name: 'browser_wait_for', arguments: {
+          condition: { kind: 'text', text: 'Tyrs', state: 'visible' },
+        } },
         { name: 'browser_snapshot', arguments: {} },
       ],
     },

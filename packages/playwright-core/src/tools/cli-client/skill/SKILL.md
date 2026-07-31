@@ -108,9 +108,8 @@ playwright-cli pdf --filename=page.pdf
 playwright-cli tab-list
 playwright-cli tab-new
 playwright-cli tab-new https://example.com/page
-playwright-cli tab-close
-playwright-cli tab-close 2
-playwright-cli tab-select 0
+playwright-cli tab-close <tab-id-from-tab-list>
+playwright-cli tab-select <tab-id-from-tab-list>
 ```
 
 ### Storage
@@ -373,7 +372,7 @@ playwright-cli close
 playwright-cli open https://example.com
 playwright-cli tab-new https://example.com/other
 playwright-cli tab-list
-playwright-cli tab-select 0
+playwright-cli tab-select <tab-id-from-tab-list>
 playwright-cli snapshot
 playwright-cli close
 ```

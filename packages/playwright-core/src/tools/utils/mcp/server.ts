@@ -41,26 +41,39 @@ export type ClientInfo = {
 };
 
 class BackendManager {
-  private _backends = new Map<ServerBackend, ServerBackendFactory>();
+  private _backends = new Map<ServerBackend, { factory: ServerBackendFactory; clientInfo: ClientInfo }>();
 
   async createBackend(factory: ServerBackendFactory, clientInfo: ClientInfo): Promise<ServerBackend> {
     const backend = await factory.create(clientInfo);
     await backend.initialize?.(clientInfo);
-    this._backends.set(backend, factory);
+    this._backends.set(backend, { factory, clientInfo });
     return backend;
   }
 
   async disposeBackend(backend: ServerBackend) {
-    const factory = this._backends.get(backend);
-    if (!factory)
+    const entry = this._backends.get(backend);
+    if (!entry)
       return;
-    await backend.dispose?.();
-    await factory.disposed(backend).catch(serverDebug);
     this._backends.delete(backend);
+    try {
+      await backend.dispose?.();
+    } finally {
+      await entry.factory.disposed(backend).catch(serverDebug);
+    }
+  }
+
+  async disposeTask(factory: ServerBackendFactory, scope: string, taskId: string): Promise<void> {
+    const matches = [...this._backends].filter(([, entry]) =>
+      entry.factory === factory && entry.clientInfo.scope === scope && entry.clientInfo.taskId === taskId);
+    await Promise.all(matches.map(([backend]) => this.disposeBackend(backend)));
   }
 }
 
 const backendManager = new BackendManager();
+
+export async function disposeTaskBackends(factory: ServerBackendFactory, scope: string, taskId: string): Promise<void> {
+  await backendManager.disposeTask(factory, scope, taskId);
+}
 
 export interface ServerBackend {
   initialize?(clientInfo: ClientInfo): Promise<void>;

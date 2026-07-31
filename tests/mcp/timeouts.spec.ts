@@ -31,6 +31,7 @@ test('action timeout (default)', async ({ server, startClient }) => {
       url: server.PREFIX,
     },
   });
+  await client.callTool({ name: 'browser_snapshot' });
 
   expect(await client.callTool({
     name: 'browser_type',
@@ -61,6 +62,7 @@ test('action timeout (custom)', async ({ startClient, server }) => {
       url: server.PREFIX,
     },
   });
+  await client.callTool({ name: 'browser_snapshot' });
 
   expect(await client.callTool({
     name: 'browser_type',
@@ -94,7 +96,10 @@ test('wait_for text timeout', async ({ startClient, server }) => {
 
   expect(await client.callTool({
     name: 'browser_wait_for',
-    arguments: { text: 'This text will never appear' },
+    arguments: {
+      condition: { kind: 'text', text: 'This text will never appear', state: 'visible' },
+      timeoutMs: 1234,
+    },
   })).toHaveResponse({
     error: expect.stringContaining(`Timeout 1234ms exceeded.`),
     isError: true,
@@ -119,9 +124,12 @@ test('wait_for textGone timeout', async ({ startClient, server }) => {
 
   expect(await client.callTool({
     name: 'browser_wait_for',
-    arguments: { textGone: 'Permanent text' },
+    arguments: {
+      condition: { kind: 'text', text: 'Permanent text', state: 'hidden' },
+      timeoutMs: 1234,
+    },
   })).toHaveResponse({
-    error: expect.stringContaining(`Timeout 1234ms exceeded.`),
+    error: expect.stringContaining(`timed out after 1234ms`),
     isError: true,
   });
 });

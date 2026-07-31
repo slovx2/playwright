@@ -515,10 +515,10 @@ const tabClose = declareCommand({
   description: 'Close a browser tab',
   category: 'tabs',
   args: z.object({
-    index: numberArg.optional().describe('Tab index. If omitted, current tab is closed.'),
+    tabId: z.string().describe('Stable tab ID returned by tab-list.'),
   }),
   toolName: 'browser_tabs',
-  toolParams: ({ index }) => ({ action: 'close', index }),
+  toolParams: ({ tabId }) => ({ action: 'close', tabId }),
 });
 
 const tabSelect = declareCommand({
@@ -526,10 +526,10 @@ const tabSelect = declareCommand({
   description: 'Select a browser tab',
   category: 'tabs',
   args: z.object({
-    index: numberArg.describe('Tab index'),
+    tabId: z.string().describe('Stable tab ID returned by tab-list.'),
   }),
   toolName: 'browser_tabs',
-  toolParams: ({ index }) => ({ action: 'select', index }),
+  toolParams: ({ tabId }) => ({ action: 'select', tabId }),
 });
 
 // Storage

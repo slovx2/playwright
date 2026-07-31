@@ -159,8 +159,8 @@ playwright-cli mousewheel <dx> <dy>     # scroll
 ```bash
 playwright-cli tab-list                 # list all tabs
 playwright-cli tab-new [url]            # create a new tab
-playwright-cli tab-select <index>       # select a tab
-playwright-cli tab-close [index]        # close a tab
+playwright-cli tab-select <tab-id>      # select a controlled tab
+playwright-cli tab-close <tab-id>       # close an agent-created tab
 ```
 
 ### Network
