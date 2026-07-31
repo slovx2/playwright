@@ -111,16 +111,19 @@ export function createServer(name: string, version: string, factory: ServerBacke
   });
 
   let backendPromise: Promise<ServerBackend> | undefined;
+  let activeToolCalls = 0;
 
   const onClose = () => backendPromise?.then(b => backendManager.disposeBackend(b)).catch(serverDebug);
   addServerListener(server, 'close', onClose);
 
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     serverDebug('callTool', request);
+    activeToolCalls++;
 
     try {
       if (!backendPromise) {
-        backendPromise = initializeServer(server, factory, transportInitialized, runHeartbeat, scope, taskId).catch(e => {
+        backendPromise = initializeServer(server, factory, transportInitialized, runHeartbeat, scope, taskId,
+            () => activeToolCalls > 0).catch(e => {
           backendPromise = undefined;
           throw e;
         });
@@ -142,12 +145,14 @@ export function createServer(name: string, version: string, factory: ServerBacke
         content: [{ type: 'text', text: '### Error\n' + String(error) }],
         isError: true,
       };
+    } finally {
+      activeToolCalls--;
     }
   });
   return server;
 }
 
-const initializeServer = async (server: ServerType, factory: ServerBackendFactory, transportInitialized: Promise<void>, runHeartbeat: boolean, scope: string, taskId?: string): Promise<ServerBackend> => {
+const initializeServer = async (server: ServerType, factory: ServerBackendFactory, transportInitialized: Promise<void>, runHeartbeat: boolean, scope: string, taskId: string | undefined, isBusy: () => boolean): Promise<ServerBackend> => {
   const capabilities = server.getClientCapabilities();
   let clientRoots: Root[] = [];
   if (capabilities?.roots) {
@@ -168,7 +173,7 @@ const initializeServer = async (server: ServerType, factory: ServerBackendFactor
 
   const backend = await backendManager.createBackend(factory, clientInfo);
   if (runHeartbeat)
-    startHeartbeat(server);
+    startHeartbeat(server, isBusy);
   return backend;
 };
 
@@ -184,19 +189,26 @@ const pingTimeout = (): number => {
   return parsed;
 };
 
-const startHeartbeat = (server: ServerType) => {
+const startHeartbeat = (server: ServerType, isBusy: () => boolean) => {
   const timeout = pingTimeout();
   if (timeout <= 0)
     return;
 
   const beat = () => {
+    if (isBusy()) {
+      setTimeout(beat, 3000);
+      return;
+    }
     Promise.race([
       server.ping(),
       new Promise((_, reject) => setTimeout(() => reject(new Error('ping timeout')), timeout)),
     ]).then(() => {
       setTimeout(beat, 3000);
     }).catch(() => {
-      void server.close();
+      if (isBusy())
+        setTimeout(beat, 3000);
+      else
+        void server.close();
     });
   };
 

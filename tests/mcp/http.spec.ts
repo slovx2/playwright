@@ -116,6 +116,30 @@ test('http transport returns a delayed tool result as JSON', async ({ serverEndp
   await client.close();
 });
 
+test('heartbeat does not reap a session during an active tool call', async ({ serverEndpoint, server }) => {
+  const { url, stderr } = await serverEndpoint({ env: { PLAYWRIGHT_MCP_PING_TIMEOUT_MS: '500' } });
+  const transport = new StreamableHTTPClientTransport(new URL('/mcp', url));
+  const client = new Client({ name: 'busy heartbeat test', version: '1.0.0' });
+  // Codex 0.145 does not answer server-initiated pings while it is awaiting a tool result.
+  client.setRequestHandler(PingRequestSchema, () => new Promise(() => {}));
+  await client.connect(transport);
+  await client.callTool({ name: 'browser_navigate', arguments: { url: server.HELLO_WORLD } });
+
+  const startedAt = performance.now();
+  const result = await client.callTool({
+    name: 'browser_wait_for',
+    arguments: { condition: { kind: 'delay', delayMs: 4500 }, timeoutMs: 8000 },
+  });
+  const elapsedMs = performance.now() - startedAt;
+
+  expect(result.isError).not.toBe(true);
+  expect(elapsedMs).toBeGreaterThanOrEqual(4000);
+  expect(elapsedMs).toBeLessThan(7000);
+  expect(formatLog(stderr())['delete http session']).toBeUndefined();
+  await transport.terminateSession();
+  await client.close();
+});
+
 test('http transport pins each MCP session to its browser scope', async ({ serverEndpoint }) => {
   const { url } = await serverEndpoint();
   const environmentScope = '11111111-1111-4111-8111-111111111111';
