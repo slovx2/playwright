@@ -27,12 +27,12 @@ const conditionSchema = z.discriminatedUnion('kind', [
     kind: z.literal('text'),
     text: z.string().min(1),
     state: z.enum(['visible', 'hidden']),
-    exact: z.boolean().optional().default(false),
+    exact: z.boolean().optional().describe('Whether text matching is exact. Defaults to false.'),
   }),
   z.object({
     kind: z.literal('url'),
     value: z.string().min(1),
-    match: z.enum(['exact', 'glob', 'regex']).optional().default('exact'),
+    match: z.enum(['exact', 'glob', 'regex']).optional().describe('URL matching mode. Defaults to exact.'),
   }),
   z.object({
     kind: z.literal('load'),
@@ -41,7 +41,7 @@ const conditionSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('response'),
     url: z.string().min(1).describe('Exact URL, glob, or regular expression source.'),
-    match: z.enum(['exact', 'glob', 'regex']).optional().default('glob'),
+    match: z.enum(['exact', 'glob', 'regex']).optional().describe('Response URL matching mode. Defaults to glob.'),
     method: z.string().optional(),
     status: z.number().int().min(100).max(599).optional(),
   }),
@@ -60,7 +60,7 @@ const wait = defineTool({
     description: 'Wait for one explicit locator, text, URL, load, response, or delay condition. Prefer observable conditions over delay.',
     inputSchema: z.object({
       condition: conditionSchema,
-      timeoutMs: z.number().int().min(1).max(60_000).optional().default(5_000),
+      timeoutMs: z.number().int().min(1).max(60_000).optional().describe('Timeout in milliseconds. Defaults to 5000.'),
     }),
     type: 'assertion',
   },
@@ -68,7 +68,7 @@ const wait = defineTool({
   handle: async (context, params, response, signal) => {
     const tab = context.currentTabOrDie();
     const page = tab.page;
-    const timeout = params.timeoutMs;
+    const timeout = params.timeoutMs ?? 5_000;
     const condition = params.condition;
 
     if (condition.kind === 'delay') {
@@ -101,12 +101,12 @@ const wait = defineTool({
         }, timeout, signal);
       }
     } else if (condition.kind === 'url') {
-      const matcher = urlMatcher(condition.value, condition.match);
+      const matcher = urlMatcher(condition.value, condition.match ?? 'exact');
       await abortable(page.waitForURL(matcher, { timeout }), signal);
     } else if (condition.kind === 'load') {
       await abortable(page.waitForLoadState(condition.state, { timeout }), signal);
     } else {
-      const matcher = urlMatcher(condition.url, condition.match);
+      const matcher = urlMatcher(condition.url, condition.match ?? 'glob');
       await abortable(page.waitForResponse(candidate => {
         if (!matchesURL(candidate.url(), matcher))
           return false;

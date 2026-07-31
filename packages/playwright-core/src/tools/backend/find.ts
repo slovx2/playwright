@@ -30,8 +30,8 @@ const find = defineTabTool({
     inputSchema: z.object({
       text: z.string().optional().describe('Plain text to search for in the page snapshot (case-insensitive substring match). Provide either text or regex, not both.'),
       regex: z.string().optional().refine(v => !v || isValidRegex(v), { message: 'Invalid regular expression' }).describe('Regular expression to search for in the page snapshot. Matching is case-sensitive by default; wrap the pattern in slashes to add flags, e.g. "/error/i" for case-insensitive. Provide either text or regex, not both.'),
-      exact: z.boolean().optional().default(false).describe('For text search, require a case-insensitive whole-line match.'),
-      limit: z.number().int().min(1).max(100).optional().default(20).describe('Maximum number of matches to return.'),
+      exact: z.boolean().optional().describe('For text search, require a case-insensitive whole-line match. Defaults to false.'),
+      limit: z.number().int().min(1).max(100).optional().describe('Maximum number of matches to return. Defaults to 20.'),
     }),
     type: 'readOnly',
   },
@@ -76,7 +76,7 @@ const find = defineTabTool({
     }
 
     // Merge matched lines into windows of context, coalescing overlapping ones.
-    const returnedLines = matchedLines.slice(0, params.limit);
+    const returnedLines = matchedLines.slice(0, params.limit ?? 20);
     const windows = returnedLines.map(line => ({
       start: Math.max(0, line - contextLines),
       end: Math.min(lines.length - 1, line + contextLines),
