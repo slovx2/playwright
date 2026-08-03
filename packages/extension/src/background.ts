@@ -77,11 +77,11 @@ class TyrsBrowserExtension {
       this._scheduleReconnect();
       return;
     }
-    const relay = authenticatedRelayURL(
-        configuration.relayUrl,
+    const proxy = authenticatedRelayURL(
+        configuration.proxyUrl,
         configuration.extensionToken,
         chrome.runtime.getManifest().version);
-    const socket = new WebSocket(relay);
+    const socket = new WebSocket(proxy);
     this._socket = socket;
     socket.onopen = () => void this._onOpen(socket, configuration);
     socket.onclose = () => this._onDisconnect(socket);

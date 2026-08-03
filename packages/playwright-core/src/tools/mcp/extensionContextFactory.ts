@@ -25,10 +25,10 @@ const debugLogger = debug('pw:mcp:relay');
 
 export async function createExtensionBrowser(channel: string, executablePath: string | undefined, clientName: string): Promise<playwrightTypes.Browser> {
   const httpServer = createHttpServer();
-  const relayPort = Number(process.env.TYRS_BROWSER_RELAY_PORT);
-  if (!Number.isInteger(relayPort) || relayPort < 1 || relayPort > 65535)
-    throw new Error('invalid TYRS_BROWSER_RELAY_PORT');
-  await startHttpServer(httpServer, { host: '127.0.0.1', port: relayPort });
+  const proxyPort = Number(process.env.TYRS_BROWSER_PROXY_PORT);
+  if (!Number.isInteger(proxyPort) || proxyPort < 1 || proxyPort > 65535)
+    throw new Error('invalid TYRS_BROWSER_PROXY_PORT');
+  await startHttpServer(httpServer, { host: '127.0.0.1', port: proxyPort });
   const relay = new CDPRelayServer(httpServer, channel, executablePath);
   debugLogger(`CDP relay server started, extension endpoint: ${relay.extensionEndpoint()}.`);
 

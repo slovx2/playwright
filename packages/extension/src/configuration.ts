@@ -1,5 +1,5 @@
 export type ExtensionConfiguration = {
-  relayUrl: string;
+  proxyUrl: string;
   statusUrl: string;
   extensionToken: string;
 };
@@ -39,14 +39,14 @@ export function validateConfiguration(values: unknown): ExtensionConfiguration |
   if (!values || typeof values !== 'object')
     return undefined;
   const candidate = values as Partial<ExtensionConfiguration>;
-  if (!candidate.relayUrl || !candidate.statusUrl || !candidate.extensionToken)
+  if (!candidate.proxyUrl || !candidate.statusUrl || !candidate.extensionToken)
     return undefined;
   try {
-    const relay = new URL(candidate.relayUrl);
+    const proxy = new URL(candidate.proxyUrl);
     const status = new URL(candidate.statusUrl);
-    if (!isLoopback(relay.hostname) || !isLoopback(status.hostname))
+    if (!isLoopback(proxy.hostname) || !isLoopback(status.hostname))
       return undefined;
-    if (relay.protocol !== 'ws:' && relay.protocol !== 'wss:')
+    if (proxy.protocol !== 'ws:' && proxy.protocol !== 'wss:')
       return undefined;
     if (status.protocol !== 'http:' && status.protocol !== 'https:')
       return undefined;

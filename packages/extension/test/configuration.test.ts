@@ -3,7 +3,7 @@ import test from 'node:test';
 import { loadConfiguration, validateConfiguration } from '../src/configuration';
 
 const managed = {
-  relayUrl: 'ws://127.0.0.1:8932/extension',
+  proxyUrl: 'ws://127.0.0.1:8932/extension',
   statusUrl: 'http://127.0.0.1:8931/extension-status',
   extensionToken: 'managed-token',
 };
@@ -11,7 +11,7 @@ const managed = {
 test('managed values override local configuration without contacting bootstrap', async () => {
   let fetches = 0;
   const result = await loadConfiguration(async () => managed, async () => ({
-    relayUrl: 'ws://localhost:1/local',
+    proxyUrl: 'ws://localhost:1/local',
     statusUrl: 'http://localhost:2/local',
     extensionToken: 'local-token',
   }), async () => {
@@ -39,20 +39,20 @@ test('storage and bootstrap failures leave the extension unconfigured', async ()
   assert.equal(await loadConfiguration(async () => ({}), async () => ({}),
       async () => { throw new Error('offline'); }), undefined);
   assert.equal(await loadConfiguration(async () => ({}), async () => ({}),
-      async () => Response.json({ relayUrl: managed.relayUrl })), undefined);
+      async () => Response.json({ proxyUrl: managed.proxyUrl })), undefined);
 });
 
 test('validation rejects incomplete, malformed, non-loopback and invalid-protocol values', () => {
   for (const value of [
     undefined,
     {},
-    { ...managed, relayUrl: 'not-a-url' },
-    { ...managed, relayUrl: 'https://127.0.0.1:8932/extension' },
-    { ...managed, relayUrl: 'ws://192.168.1.2:8932/extension' },
+    { ...managed, proxyUrl: 'not-a-url' },
+    { ...managed, proxyUrl: 'https://127.0.0.1:8932/extension' },
+    { ...managed, proxyUrl: 'ws://192.168.1.2:8932/extension' },
     { ...managed, statusUrl: 'file:///tmp/status' },
     { ...managed, statusUrl: 'http://example.com/status' },
   ])
     assert.equal(validateConfiguration(value), undefined, JSON.stringify(value));
-  assert.deepEqual(validateConfiguration({ ...managed, relayUrl: 'wss://[::1]:8932/extension' }),
-      { ...managed, relayUrl: 'wss://[::1]:8932/extension' });
+  assert.deepEqual(validateConfiguration({ ...managed, proxyUrl: 'wss://[::1]:8932/extension' }),
+      { ...managed, proxyUrl: 'wss://[::1]:8932/extension' });
 });
