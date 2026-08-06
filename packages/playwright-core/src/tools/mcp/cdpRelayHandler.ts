@@ -41,6 +41,9 @@ export interface ExtensionProtocolHandler {
   // Playwright. Called once `ready()` has resolved and the Playwright ws is
   // about to start draining — before this call the handler is a silent sink.
   connectOverCDP(sendToCDPClient: SendToCDPClient): void;
+  // Releases debugger attachments owned by the current CDP client while
+  // keeping the extension transport available for a later client.
+  disconnectOverCDP(): Promise<void>;
   // Called when the extension WebSocket closes. Handlers should reject any
   // pending `ready()` promise so a blocked `establishExtensionConnection`
   // bails out instead of hanging forever.

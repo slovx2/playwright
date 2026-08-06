@@ -34,6 +34,16 @@ test('discovers and attaches user tabs only when explicitly requested', async ()
       title: 'Updated', active: true, pinned: false },
   ]);
   expect(commands.filter(command => command.method === 'chrome.debugger.attach')).toHaveLength(2);
+
+  await model.disconnectOverCDP();
+  expect(commands.filter(command => command.method === 'chrome.debugger.detach')).toEqual([
+    { method: 'chrome.debugger.detach', params: [{ tabId: 7 }] },
+    { method: 'chrome.debugger.detach', params: [{ tabId: 8 }] },
+  ]);
+
+  model.onTabCreated({ id: 9, index: 2, windowId: 1, url: 'https://example.net',
+    title: 'Example Net', active: false, pinned: false });
+  expect(commands.filter(command => command.method === 'chrome.debugger.attach')).toHaveLength(2);
 });
 
 test('creates and attaches an about:blank target before navigation', async () => {

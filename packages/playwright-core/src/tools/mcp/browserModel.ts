@@ -75,6 +75,17 @@ export class BrowserModel {
     this._sendToCDPClient = sendToCDPClient;
   }
 
+  async disconnectOverCDP(): Promise<void> {
+    this._autoAttach = false;
+    this._sendToCDPClient = null;
+    await Promise.allSettled([...this._tabAttachPromises.values()]);
+    const tabIds = [...this._tabSessions.keys()];
+    await Promise.allSettled(tabIds.map(tabId =>
+      this._sendToExtension('chrome.debugger.detach', [{ tabId }])));
+    this._tabSessions.clear();
+    this._tabAttachPromises.clear();
+  }
+
   private _emit(message: CDPMessage): void {
     this._sendToCDPClient?.(message);
   }

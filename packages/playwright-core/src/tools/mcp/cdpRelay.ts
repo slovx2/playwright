@@ -123,6 +123,10 @@ export class CDPRelayServer {
     return { count, tabs };
   }
 
+  async releaseCDP(): Promise<void> {
+    await this._handler.disconnectOverCDP();
+  }
+
   async establishExtensionConnection(_clientName: string) {
     debugLogger('Establishing extension connection');
     debugLogger('Waiting for incoming extension connection');
@@ -175,7 +179,10 @@ export class CDPRelayServer {
       }
     });
     ws.on('close', () => {
-      this._closeExtensionConnection('Playwright client disconnected');
+      if (this._cdpConnection !== ws)
+        return;
+      this._cdpConnection = null;
+      void this._handler.disconnectOverCDP().catch(logUnhandledError);
       debugLogger('Playwright WebSocket closed');
     });
     ws.on('error', error => {

@@ -54,6 +54,10 @@ export class ExtensionProtocolV2 implements ExtensionProtocolHandler {
     this._model.connectOverCDP(sendToCDPClient);
   }
 
+  async disconnectOverCDP(): Promise<void> {
+    await this._model.disconnectOverCDP();
+  }
+
   async discoverTabs(tabs: Tab[]): Promise<number> {
     return await this._model.discoverTabs(tabs);
   }

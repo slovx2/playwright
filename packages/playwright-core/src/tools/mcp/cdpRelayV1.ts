@@ -36,6 +36,11 @@ export class ExtensionProtocolV1 implements ExtensionProtocolHandler {
     this._sendToCDPClient = sendToCDPClient;
   }
 
+  async disconnectOverCDP(): Promise<void> {
+    this._sendToCDPClient = null;
+    this._connectedTabInfo = undefined;
+  }
+
   handleExtensionEvent(method: string, params: any): void {
     switch (method) {
       case 'forwardCDPEvent': {

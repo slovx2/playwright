@@ -47,6 +47,17 @@ test('CDP relay rejects an old profile before it can occupy the extension connec
       currentProfile.once('error', reject);
     });
     await expect(relay.extensionCommand('tyrs.sessions.reset', [])).resolves.toBeUndefined();
+
+    const playwrightClient = new WebSocket(relay.cdpEndpoint());
+    await new Promise<void>((resolve, reject) => {
+      playwrightClient.once('open', resolve);
+      playwrightClient.once('error', reject);
+    });
+    const playwrightClosed = new Promise<void>(resolve => playwrightClient.once('close', () => resolve()));
+    playwrightClient.close(1000, 'session idle');
+    await playwrightClosed;
+    await expect(relay.extensionCommand('tyrs.sessions.reset', [])).resolves.toBeUndefined();
+
     currentProfile.close(1000, 'current profile stopped');
     await expect(extensionDisconnected).resolves.toBe('current profile stopped');
   } finally {
