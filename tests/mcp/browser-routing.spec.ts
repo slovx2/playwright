@@ -165,6 +165,38 @@ test('recoverable timeout preserves the selected backend', async () => {
   expect(factories).toBe(1);
 });
 
+test('metadata failure discards the blocked backend before the next call', async () => {
+  let factories = 0;
+  let disposals = 0;
+  const routing = new RoutingBrowserBackend({
+    worker: async () => {
+      const generation = ++factories;
+      return {
+        initialize: async () => {},
+        dispose: async () => { disposals++; },
+        callTool: async () => generation === 1 ? {
+          content: [{ type: 'text' as const, text: 'BROWSER_METADATA_UNAVAILABLE stage=discoverTabs durationMs=5000' }],
+          isError: true,
+          isClose: true,
+        } : { content: [{ type: 'text' as const, text: 'recovered' }] },
+      } as any;
+    },
+    desktop: async () => { throw new Error('must not be called'); },
+  }, {
+    worker: () => ({ available: true, label: 'worker' }),
+    desktop: () => ({ available: false, label: 'desktop' }),
+  });
+  await routing.initialize({ cwd: process.cwd(), clientName: 'test', scope: 'worker' });
+  const failed = await routing.callTool('browser_tabs', { action: 'list' });
+  expect(failed.isError).toBeTruthy();
+  expect(failed.content[0].type === 'text' && failed.content[0].text).toContain('BROWSER_METADATA_UNAVAILABLE');
+  expect(failed.content[0].type === 'text' && failed.content[0].text).toContain('"sessionPreserved": false');
+  const recovered = await routing.callTool('browser_tabs', { action: 'list' });
+  expect(recovered.isError).toBeFalsy();
+  expect(factories).toBe(2);
+  expect(disposals).toBe(1);
+});
+
 test('Tyrs browser output redacts credentials and password HTML', () => {
   const redacted = redactSensitiveData([
     'Authorization: Bearer abc',

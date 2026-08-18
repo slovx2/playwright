@@ -111,7 +111,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   constructor(context: Context, page: playwright.Page, onPageClose: (tab: Tab) => void, id: string = crypto.randomUUID()) {
     super();
     this.id = id;
-    this._lastHeader = { id, title: 'about:blank', url: 'about:blank', current: false, crashed: false, console: { total: 0, warnings: 0, errors: 0 } };
+    this._lastHeader = { id, title: '', url: 'about:blank', current: false, crashed: false, console: { total: 0, warnings: 0, errors: 0 } };
     this.context = context;
     this.page = page;
     this._onPageClose = onPageClose;
@@ -285,18 +285,27 @@ export class Tab extends EventEmitter<TabEventsInterface> {
 
   async headerSnapshot(): Promise<TabHeader & { changed: boolean }> {
     let title: string | undefined;
+    let url = this.page.url();
+    let current = this.isCurrentTab();
     let consoleCounts = { total: 0, errors: 0, warnings: 0 };
     if (!this.crashed) {
-      await this._raceAgainstModalStates(async () => {
-        title = await this.page.title();
-      });
+      if (this.context.hasTabMetadataProvider()) {
+        const metadata = await this.context.tabMetadataForPage(this.page);
+        title = metadata?.title ?? this.cachedTitle();
+        url = metadata?.url ?? url;
+        current = metadata?.active ?? current;
+      } else {
+        await this._raceAgainstModalStates(async () => {
+          title = await this.page.title();
+        });
+      }
       consoleCounts = await this.consoleMessageCount();
     }
     const newHeader: TabHeader = {
       id: this.id,
       title: title ?? '',
-      url: this.page.url(),
-      current: this.isCurrentTab(),
+      url,
+      current,
       crashed: this.crashed,
       mainDocumentStatus: this._mainDocumentStatus,
       console: consoleCounts,
@@ -307,6 +316,12 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       return { ...this._lastHeader, changed: true };
     }
     return { ...this._lastHeader, changed: false };
+  }
+
+  cachedTitle(): string {
+    if (this._lastHeader.url !== this.page.url())
+      return '';
+    return this._lastHeader.title;
   }
 
   isCurrentTab(): boolean {

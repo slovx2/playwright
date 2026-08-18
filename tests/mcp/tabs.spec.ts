@@ -16,6 +16,8 @@
 
 import { test, expect } from './fixtures';
 import { Context } from '../../packages/playwright-core/src/tools/backend/context';
+import { BrowserBackend } from '../../packages/playwright-core/src/tools/backend/browserBackend';
+import tabsTools from '../../packages/playwright-core/src/tools/backend/tabs';
 
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 
@@ -249,4 +251,117 @@ test('user tab claim tokens are single-use, list-scoped, page-bound, and expirin
     Date.now = originalNow;
   }
   await context.dispose();
+});
+
+test('extension tab metadata never reads renderer titles and is reused within one call', async ({ cdpServer }, testInfo) => {
+  const browserContext = await cdpServer.start();
+  const page = browserContext.pages()[0];
+  let titleCalls = 0;
+  (page as any).title = async () => {
+    titleCalls++;
+    return await new Promise<string>(() => {});
+  };
+  let metadataCalls = 0;
+  const context = new Context(browserContext as any, {
+    config: {},
+    cwd: testInfo.outputPath(),
+    tabMetadataProvider: {
+      listTabs: async () => {
+        metadataCalls++;
+        return [{ id: 7, title: 'Native title', url: page.url(), active: true }];
+      },
+      invalidate: () => {},
+    },
+  });
+  context.beginToolCall();
+  await context.refreshTabs();
+  const first = await context.currentTabOrDie().headerSnapshot();
+  const second = await context.currentTabOrDie().headerSnapshot();
+  expect(first.title).toBe('Native title');
+  expect(second.title).toBe('Native title');
+  expect(metadataCalls).toBe(1);
+  expect(titleCalls).toBe(0);
+  await context.dispose();
+});
+
+test('a renderer-blocked tab does not block another metadata-backed session', async ({ cdpServer }, testInfo) => {
+  const browserContext = await cdpServer.start();
+  const page = browserContext.pages()[0];
+  (page as any).title = async () => await new Promise<string>(() => {});
+  const createBackend = async (title: string) => {
+    const backend = new BrowserBackend({}, browserContext as any, tabsTools, {
+      listTabs: async () => [{ id: 7, title, url: page.url(), active: true }],
+      invalidate: () => {},
+    });
+    await backend.initialize({ clientName: title, cwd: testInfo.outputPath() });
+    return backend;
+  };
+  const first = await createBackend('First session');
+  const second = await createBackend('Second session');
+  const [firstResult, secondResult] = await Promise.all([
+    first.callTool('browser_tabs', { action: 'list' }),
+    second.callTool('browser_tabs', { action: 'list' }),
+  ]);
+  expect(firstResult.content).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: 'text', text: expect.stringContaining('First session') }),
+  ]));
+  expect(secondResult.content).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: 'text', text: expect.stringContaining('Second session') }),
+  ]));
+  await Promise.all([first.dispose(), second.dispose()]);
+});
+
+test('extension metadata does not guess between duplicate URLs', async ({ cdpServer }, testInfo) => {
+  const browserContext = await cdpServer.start();
+  const first = browserContext.pages()[0];
+  const second = await browserContext.newPage();
+  const url = 'data:text/html,duplicate';
+  await Promise.all([first.goto(url), second.goto(url)]);
+  const context = new Context(browserContext as any, {
+    config: { isolatedTabs: true },
+    cwd: testInfo.outputPath(),
+    tabMetadataProvider: {
+      listTabs: async () => [
+        { id: 1, title: 'First', url, active: true },
+        { id: 2, title: 'Second', url, active: false },
+      ],
+      invalidate: () => {},
+    },
+  });
+  context.beginToolCall();
+  const available = await context.availableTabs();
+  expect(available.map(tab => tab.title)).toEqual(['', '']);
+  await context.dispose();
+});
+
+test('metadata timeout closes only the current backend connection', async ({ cdpServer }, testInfo) => {
+  const browserContext = await cdpServer.start();
+  let invalidated = '';
+  const backend = new BrowserBackend({ timeouts: { action: 20 } }, browserContext as any, tabsTools, {
+    listTabs: async () => await new Promise(() => {}),
+    invalidate: reason => invalidated = reason,
+  });
+  await backend.initialize({ clientName: 'metadata timeout', cwd: testInfo.outputPath() });
+  const result = await backend.callTool('browser_tabs', { action: 'list' });
+  expect(result.isError).toBeTruthy();
+  expect(result.isClose).toBeTruthy();
+  expect(result.content).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: 'text', text: expect.stringContaining('BROWSER_METADATA_UNAVAILABLE') }),
+  ]));
+  expect(invalidated).toBe('BROWSER_METADATA_UNAVAILABLE');
+  expect(browserContext.pages()).toHaveLength(1);
+  await backend.dispose();
+
+  const replacement = new BrowserBackend({ timeouts: { action: 20 } }, browserContext as any, tabsTools, {
+    listTabs: async () => [{ id: 1, title: 'Recovered', url: 'about:blank', active: true }],
+    invalidate: () => {},
+  });
+  await replacement.initialize({ clientName: 'metadata recovered', cwd: testInfo.outputPath() });
+  const recovered = await replacement.callTool('browser_tabs', { action: 'list' });
+  expect(recovered.isError).toBeFalsy();
+  expect(recovered.content).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: 'text', text: expect.stringContaining('Recovered') }),
+  ]));
+  expect(browserContext.pages()).toHaveLength(1);
+  await replacement.dispose();
 });

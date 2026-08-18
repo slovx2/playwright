@@ -127,6 +127,10 @@ export class CDPRelayServer {
     await this._handler.disconnectOverCDP();
   }
 
+  closeCDPConnection(reason: string): void {
+    this._closeCDPConnection(reason);
+  }
+
   async establishExtensionConnection(_clientName: string) {
     debugLogger('Establishing extension connection');
     debugLogger('Waiting for incoming extension connection');

@@ -26,12 +26,14 @@ import { isPathInside, isSystemDirectory, isWritable } from '@utils/fileUtils';
 import { playwright } from '../../inprocess';
 
 import { Tab } from './tab';
+import { readTabMetadata } from './tabMetadata';
 
 import type * as playwrightTypes from '../../..';
 import type { TabHeader } from './tab';
 import type { SessionLog } from './sessionLog';
 import type { Disposable } from '@isomorphic/disposable';
 import type { ToolCapability } from './tool';
+import type { TabMetadata, TabMetadataProvider } from './tabMetadata';
 
 const testDebug = debug('pw:mcp:test');
 
@@ -73,6 +75,7 @@ type ContextOptions = {
   config: ContextConfig;
   sessionLog?: SessionLog;
   cwd: string;
+  tabMetadataProvider?: TabMetadataProvider;
 };
 
 export type RouteEntry = {
@@ -102,6 +105,7 @@ type TabClaim = {
   page: playwrightTypes.Page;
   title: string;
   url: string;
+  nativeTabId?: number;
   expiresAt: number;
 };
 
@@ -115,6 +119,10 @@ export class Context {
   private _currentTab: Tab | undefined;
   private _tabStates = new Map<Tab, ManagedTabState>();
   private _tabClaims = new Map<string, TabClaim>();
+  private _tabMetadataPromise: Promise<TabMetadata[]> | undefined;
+  private _pageMetadataMapPromise: Promise<Map<playwrightTypes.Page, TabMetadata>> | undefined;
+  private _primedTabMetadata: TabMetadata[] | undefined;
+  private _lastTabMetadata: TabMetadata[] | undefined;
   private _creatingPage = false;
   private _sessionName = '🌐 Browser task';
   private _routes: RouteEntry[] = [];
@@ -157,6 +165,48 @@ export class Context {
     const reasons = this._pendingUnhandledRejections.slice();
     this._pendingUnhandledRejections.length = 0;
     return reasons;
+  }
+
+  beginToolCall(): void {
+    const primed = this._primedTabMetadata;
+    this._primedTabMetadata = undefined;
+    this._tabMetadataPromise = primed ? Promise.resolve(primed) : undefined;
+    this._pageMetadataMapPromise = undefined;
+    this._lastTabMetadata = primed;
+  }
+
+  primeTabMetadata(metadata: TabMetadata[]): void {
+    this._primedTabMetadata = metadata;
+  }
+
+  lastTabMetadata(): TabMetadata[] | undefined {
+    return this._lastTabMetadata;
+  }
+
+  hasTabMetadataProvider(): boolean {
+    return !!this.options.tabMetadataProvider;
+  }
+
+  async tabMetadata(): Promise<TabMetadata[]> {
+    const provider = this.options.tabMetadataProvider;
+    if (!provider)
+      return [];
+    if (!this._tabMetadataPromise) {
+      const timeout = this.config.timeouts?.action ?? 5_000;
+      this._tabMetadataPromise = readTabMetadata(provider, timeout).then(metadata => {
+        this._lastTabMetadata = metadata;
+        return metadata;
+      });
+    }
+    return await this._tabMetadataPromise;
+  }
+
+  async tabMetadataForPage(page: playwrightTypes.Page): Promise<TabMetadata | undefined> {
+    if (!this.options.tabMetadataProvider)
+      return undefined;
+    if (!this._pageMetadataMapPromise)
+      this._pageMetadataMapPromise = this._buildPageMetadataMap();
+    return (await this._pageMetadataMapPromise).get(page);
   }
 
   onUnhandledRejection(listener: (reason: unknown) => void): () => void {
@@ -229,8 +279,15 @@ export class Context {
       throw new Error('Claim token is invalid or expired; list tabs again');
     if (this._tabs.some(existing => existing.page === claim.page) || claim.page.isClosed())
       throw new Error('Claimed tab is no longer available; list tabs again');
-    if (claim.page.url() !== claim.url || await claim.page.title() !== claim.title)
+    if (this.hasTabMetadataProvider()) {
+      const metadata = await this.tabMetadataForPage(claim.page);
+      if (claim.page.url() !== claim.url || !metadata ||
+          (claim.nativeTabId !== undefined && metadata.id !== claim.nativeTabId) ||
+          metadata.title !== claim.title)
+        throw new Error('Claimed tab changed after it was listed; list tabs again');
+    } else if (claim.page.url() !== claim.url || await claim.page.title() !== claim.title) {
       throw new Error('Claimed tab changed after it was listed; list tabs again');
+    }
     this._onPageCreated(claim.page, { origin: 'user', disposition: 'omit' });
     const tab = this._tabs.find(candidate => candidate.page === claim.page)!;
     this._setTabState(tab, { origin: 'user', disposition: 'omit' });
@@ -246,18 +303,59 @@ export class Context {
       !this._tabs.some(tab => tab.page === page) && !isInternalPage(page.url()));
     return await Promise.all(pages.map(async page => {
       const claimToken = crypto.randomUUID();
-      const title = await page.title().catch(() => '');
-      const url = page.url();
-      this._tabClaims.set(claimToken, { page, title, url, expiresAt: Date.now() + 30_000 });
+      const metadata = await this.tabMetadataForPage(page);
+      const title = this.hasTabMetadataProvider() ? metadata?.title ?? '' : await page.title().catch(() => '');
+      const url = metadata?.url ?? page.url();
+      this._tabClaims.set(claimToken, {
+        page,
+        title,
+        url,
+        nativeTabId: metadata?.id,
+        expiresAt: Date.now() + 30_000,
+      });
       return {
         claimToken,
         title,
         url,
-        current: false,
+        current: metadata?.active ?? false,
         crashed: false,
         console: { total: 0, warnings: 0, errors: 0 },
       };
     }));
+  }
+
+  private async _buildPageMetadataMap(): Promise<Map<playwrightTypes.Page, TabMetadata>> {
+    const metadata = await this.tabMetadata();
+    const result = new Map<playwrightTypes.Page, TabMetadata>();
+    const unused = new Set(metadata.map((_tab, index) => index));
+    const pages = this._rawBrowserContext.pages().filter(page => !isInternalPage(page.url()));
+    for (const page of pages) {
+      const tab = this._tabs.find(candidate => candidate.page === page);
+      const state = tab ? this.tabState(tab) : { origin: 'user' as const, disposition: 'omit' as const };
+      const urlCandidates = [...unused].filter(index => metadata[index].url === page.url());
+      const ownershipCandidates = urlCandidates.filter(index => metadataOwnershipMatches(
+          state.origin, metadata[index], tab ? this.options.tabMetadataProvider?.sessionId : undefined));
+      const hasOwnershipMetadata = urlCandidates.some(index => {
+        const ownership = metadata[index].tyrs;
+        return !!(ownership?.sessionId || ownership?.origin);
+      });
+      const candidates = ownershipCandidates.length ? ownershipCandidates :
+        (hasOwnershipMetadata ? [] : urlCandidates);
+      let match: number | undefined;
+      if (candidates.length === 1) {
+        match = candidates[0];
+      } else if (tab) {
+        const cachedTitle = tab.cachedTitle();
+        const titleCandidates = cachedTitle ? candidates.filter(index => metadata[index].title === cachedTitle) : [];
+        if (titleCandidates.length === 1)
+          match = titleCandidates[0];
+      }
+      if (match === undefined)
+        continue;
+      unused.delete(match);
+      result.set(page, metadata[match]);
+    }
+    return result;
   }
 
   markTab(id: string | undefined, disposition: Exclude<TabDisposition, 'omit'>): Tab {
@@ -554,6 +652,14 @@ function originOrHostGlob(originOrHost: string) {
 
 function isInternalPage(url: string): boolean {
   return /^(chrome|chrome-extension|devtools|edge):/i.test(url);
+}
+
+function metadataOwnershipMatches(origin: TabOrigin, metadata: TabMetadata, sessionId?: string): boolean {
+  if (metadata.tyrs?.sessionId)
+    return !!sessionId && metadata.tyrs.sessionId === sessionId;
+  if (origin === 'agent')
+    return metadata.tyrs?.origin === 'agent';
+  return metadata.tyrs?.origin !== 'agent';
 }
 
 export async function workspaceFile(options: ContextOptions, fileName: string, perCallWorkspaceDir?: string): Promise<string> {

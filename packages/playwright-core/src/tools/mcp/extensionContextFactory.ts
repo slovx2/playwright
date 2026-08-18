@@ -20,8 +20,14 @@ import { playwright } from '../../inprocess';
 import { CDPRelayServer } from './cdpRelay';
 
 import type * as playwrightTypes from '../../..';
+import type { TabMetadataProvider } from '../backend/tabMetadata';
 
 const debugLogger = debug('pw:mcp:relay');
+const metadataProviders = new WeakMap<playwrightTypes.Browser, TabMetadataProvider>();
+
+export function tabMetadataProviderForBrowser(browser: playwrightTypes.Browser): TabMetadataProvider | undefined {
+  return metadataProviders.get(browser);
+}
 
 export async function createExtensionBrowser(channel: string, executablePath: string | undefined, clientName: string): Promise<playwrightTypes.Browser> {
   const httpServer = createHttpServer();
@@ -35,7 +41,18 @@ export async function createExtensionBrowser(channel: string, executablePath: st
   try {
     await relay.establishExtensionConnection(clientName);
     const browser = await playwright.chromium.connectOverCDP(relay.cdpEndpoint(), { isLocal: true, timeout: 0 });
+    metadataProviders.set(browser, {
+      listTabs: async () => (await relay.discoverTabs()).tabs.map(tab => ({
+        id: tab.id,
+        title: tab.title ?? '',
+        url: tab.url ?? '',
+        active: tab.active,
+        tyrs: tab.tyrs,
+      })),
+      invalidate: reason => relay.closeCDPConnection(reason),
+    });
     browser.on('disconnected', () => {
+      metadataProviders.delete(browser);
       relay.stop();
       httpServer.close();
     });

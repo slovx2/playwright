@@ -108,13 +108,14 @@ export class RoutingBrowserBackend implements ServerBackend {
       return await this._closeService(args);
     const selected = this._selected;
     const state = this._availability[selected]();
-    if (!state.available)
+    if (!state.available) {
       return browserErrorResult({
         code: 'BROWSER_UNAVAILABLE',
         message: `${state.label}不可用；当前选择未改变`,
         recoverable: true,
         recoveryAction: '等待所选浏览器恢复；只有用户允许时才调用 browser_select 切换浏览器',
       }, selected, true, this._currentTabIds.get(selected));
+    }
     let activeBackend: ServerBackend | undefined;
     try {
       activeBackend = await this._backend(selected);
@@ -173,17 +174,19 @@ export class RoutingBrowserBackend implements ServerBackend {
 
   private _select(rawArguments: mcpServer.CallToolRequest['params']['arguments']): mcpServer.CallToolResult {
     const parsed = browserSelectSchema.inputSchema.safeParse(rawArguments || {});
-    if (!parsed.success)
+    if (!parsed.success) {
       return browserErrorResult(classifyBrowserError(`browser_select 参数无效：${z.prettifyError(parsed.error)}`),
           this._selected, true, this._currentTabIds.get(this._selected));
+    }
     const target = parsed.data.browser as BrowserId | undefined;
     if (target) {
       const state = this._availability[target]();
-      if (!state.available)
+      if (!state.available) {
         return browserErrorResult({ code: 'BROWSER_UNAVAILABLE',
           message: `${state.label}当前不可用；当前选择未改变`, recoverable: true,
           recoveryAction: '等待显式选择的浏览器恢复，不要静默切换' },
         this._selected, true, this._currentTabIds.get(this._selected));
+      }
       this._selected = target;
     }
     const browsers = (['worker', 'desktop'] as const).map(id => ({ id, ...this._availability[id]() }));
@@ -193,13 +196,15 @@ export class RoutingBrowserBackend implements ServerBackend {
   }
 
   private async _exposeService(rawArguments: mcpServer.CallToolRequest['params']['arguments']): Promise<mcpServer.CallToolResult> {
-    if (!this._services || !this._clientInfo)
+    if (!this._services || !this._clientInfo) {
       return browserErrorResult(classifyBrowserError('服务转发未配置'), this._selected, true,
           this._currentTabIds.get(this._selected));
+    }
     const parsed = browserExposeServiceSchema.inputSchema.safeParse(rawArguments || {});
-    if (!parsed.success)
+    if (!parsed.success) {
       return browserErrorResult(classifyBrowserError(`browser_expose_service 参数无效：${z.prettifyError(parsed.error)}`),
           this._selected, true, this._currentTabIds.get(this._selected));
+    }
     try {
       const value = await this._services.expose(this._clientInfo.scope, this._selected,
           this._taskId, parsed.data.port, parsed.data.lifetime as ServiceLifetime);
@@ -211,13 +216,15 @@ export class RoutingBrowserBackend implements ServerBackend {
   }
 
   private _listServices(rawArguments: mcpServer.CallToolRequest['params']['arguments']): mcpServer.CallToolResult {
-    if (!this._services || !this._clientInfo)
+    if (!this._services || !this._clientInfo) {
       return browserErrorResult(classifyBrowserError('服务转发未配置'), this._selected, true,
           this._currentTabIds.get(this._selected));
+    }
     const parsed = browserListServicesSchema.inputSchema.safeParse(rawArguments || {});
-    if (!parsed.success)
+    if (!parsed.success) {
       return browserErrorResult(classifyBrowserError(`browser_list_services 参数无效：${z.prettifyError(parsed.error)}`),
           this._selected, true, this._currentTabIds.get(this._selected));
+    }
     try {
       return jsonResult({ services: this._services.list(this._clientInfo.scope, this._selected) });
     } catch (error) {
@@ -227,13 +234,15 @@ export class RoutingBrowserBackend implements ServerBackend {
   }
 
   private async _closeService(rawArguments: mcpServer.CallToolRequest['params']['arguments']): Promise<mcpServer.CallToolResult> {
-    if (!this._services || !this._clientInfo)
+    if (!this._services || !this._clientInfo) {
       return browserErrorResult(classifyBrowserError('服务转发未配置'), this._selected, true,
           this._currentTabIds.get(this._selected));
+    }
     const parsed = browserCloseServiceSchema.inputSchema.safeParse(rawArguments || {});
-    if (!parsed.success)
+    if (!parsed.success) {
       return browserErrorResult(classifyBrowserError(`browser_close_service 参数无效：${z.prettifyError(parsed.error)}`),
           this._selected, true, this._currentTabIds.get(this._selected));
+    }
     try {
       await this._services.close(this._clientInfo.scope, this._selected, parsed.data.id);
       return jsonResult({ closed: true, id: parsed.data.id });
@@ -257,6 +266,10 @@ type BrowserFailure = {
 
 function classifyBrowserError(message: string): BrowserFailure {
   const normalized = message.toLowerCase();
+  if (normalized.includes('browser_metadata_unavailable')) {
+    return { code: 'BROWSER_METADATA_UNAVAILABLE', message, recoverable: false,
+      recoveryAction: '浏览器控制连接已重建；重新执行当前浏览器操作' };
+  }
   if (normalized.includes('control_interrupted') || normalized.includes('control was interrupted')) {
     return { code: 'BROWSER_CONTROL_INTERRUPTED', message, recoverable: true,
       recoveryAction: '调用 browser_tabs list，并使用新的 claimToken 显式认领用户标签页' };
@@ -287,7 +300,7 @@ function classifyBrowserError(message: string): BrowserFailure {
 }
 
 function browserErrorResult(error: BrowserFailure, browser: BrowserId,
-    sessionPreserved: boolean, currentTabId?: string): mcpServer.CallToolResult {
+  sessionPreserved: boolean, currentTabId?: string): mcpServer.CallToolResult {
   return {
     content: [{ type: 'text', text: JSON.stringify({
       error,

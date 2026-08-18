@@ -26,7 +26,7 @@ import { filteredTools } from '../backend/tools';
 import { testDebug } from './log';
 import { packageJSON } from '../../package';
 import { BrowserAgentRegistry } from './browserAgentRegistry';
-import { playwright as inProcessPlaywright } from '../../inprocess';
+import { tabMetadataProviderForBrowser } from './extensionContextFactory';
 
 import type { Command } from 'commander';
 import type { ClientInfo } from '../utils/mcp/server';
@@ -175,7 +175,7 @@ export function decorateMCPCommand(command: Command) {
               await browser.bind(sessionName, { workspaceDir: clientInfo.cwd });
             }
             const browserContext = config.browser.isolated ? await browser.newContext(config.browser.contextOptions) : browser.contexts()[0];
-            return new BrowserBackend(config, browserContext, tools);
+            return new BrowserBackend(config, browserContext, tools, tabMetadataProviderForBrowser(browser));
           },
           disposed: async backend => {
             clientCount--;
@@ -286,5 +286,5 @@ function createBackend(config: FullConfig & {
   const browserContext = browser.contexts()[0];
   if (!browserContext)
     throw new Error('浏览器没有可用的上下文');
-  return new BrowserBackend(config, browserContext, tools);
+  return new BrowserBackend(config, browserContext, tools, tabMetadataProviderForBrowser(browser));
 }

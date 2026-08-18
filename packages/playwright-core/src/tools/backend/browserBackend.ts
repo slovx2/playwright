@@ -20,11 +20,18 @@ import { browserBatch } from './batch';
 import { Context } from './context';
 import { Response } from './response';
 import { SessionLog } from './sessionLog';
+import { BrowserMetadataUnavailableError } from './tabMetadata';
 import type { ContextConfig } from './context';
 import type * as playwright from '../../..';
 import type { Tool } from './tool';
+import type { TabMetadata, TabMetadataProvider } from './tabMetadata';
 import type * as mcpServer from '../utils/mcp/server';
 import type { ClientInfo, ServerBackend } from '../utils/mcp/server';
+
+type BrowserCallResult = mcpServer.CallToolResult & {
+  isClose?: boolean;
+  _meta?: Record<string, unknown> & { tyrsTiming?: unknown };
+};
 
 export class BrowserBackend implements ServerBackend {
   private _tools: Tool[];
@@ -32,12 +39,14 @@ export class BrowserBackend implements ServerBackend {
   private _sessionLog: SessionLog | undefined;
   private _config: ContextConfig;
   private _disconnected = false;
+  private _tabMetadataProvider: TabMetadataProvider | undefined;
   readonly browserContext: playwright.BrowserContext;
 
-  constructor(config: ContextConfig, browserContext: playwright.BrowserContext, tools: Tool[]) {
+  constructor(config: ContextConfig, browserContext: playwright.BrowserContext, tools: Tool[], tabMetadataProvider?: TabMetadataProvider) {
     this._config = config;
     this._tools = tools;
     this.browserContext = browserContext;
+    this._tabMetadataProvider = tabMetadataProvider;
     const markDisconnected = () => { this._disconnected = true; };
     this.browserContext.once('close', markDisconnected);
     this.browserContext.browser()?.once('disconnected', markDisconnected);
@@ -49,6 +58,7 @@ export class BrowserBackend implements ServerBackend {
       config: this._config,
       sessionLog: this._sessionLog,
       cwd: clientInfo.cwd,
+      tabMetadataProvider: this._tabMetadataProvider,
     });
   }
 
@@ -56,13 +66,22 @@ export class BrowserBackend implements ServerBackend {
     await this._context?.dispose().catch(e => debug('pw:tools:error')(e));
   }
 
-  async callTool(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'] & { _meta?: Record<string, any> } = {}, signal?: AbortSignal): Promise<mcpServer.CallToolResult & { isClose?: boolean }> {
+  async callTool(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'] & { _meta?: Record<string, any> } = {}, signal?: AbortSignal): Promise<BrowserCallResult> {
+    this._context?.beginToolCall();
     if (name === browserBatch.schema.name)
       return await this._callBatch(rawArguments, signal);
     return await this._callSingleTool(name, rawArguments, signal);
   }
 
-  private async _callBatch(rawArguments: mcpServer.CallToolRequest['params']['arguments'] & { _meta?: Record<string, any> }, signal?: AbortSignal): Promise<mcpServer.CallToolResult & { isClose?: boolean }> {
+  primeTabMetadata(metadata: TabMetadata[]): void {
+    this._context?.primeTabMetadata(metadata);
+  }
+
+  lastTabMetadata(): TabMetadata[] | undefined {
+    return this._context?.lastTabMetadata();
+  }
+
+  private async _callBatch(rawArguments: mcpServer.CallToolRequest['params']['arguments'] & { _meta?: Record<string, any> }, signal?: AbortSignal): Promise<BrowserCallResult> {
     const parsed = browserBatch.schema.inputSchema.safeParse(rawArguments);
     if (!parsed.success) {
       return {
@@ -90,7 +109,7 @@ export class BrowserBackend implements ServerBackend {
       const result = await this._callSingleTool(action.name, { ...action.arguments, _meta: rawArguments._meta }, signal);
       const text = result.content.filter(item => item.type === 'text').map(item => item.text).join('\n');
       summaries.push({ index, name: action.name, ok: !result.isError, text,
-        timing: (result as any)._meta?.tyrsTiming });
+        timing: result._meta?.tyrsTiming });
       attachments.push(...result.content.filter(item => item.type !== 'text'));
       close ||= result.isClose === true;
       if (result.isError) {
@@ -114,7 +133,7 @@ export class BrowserBackend implements ServerBackend {
     };
   }
 
-  private async _callSingleTool(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'] & { _meta?: Record<string, any> } = {}, signal?: AbortSignal): Promise<mcpServer.CallToolResult & { isClose?: boolean }> {
+  private async _callSingleTool(name: string, rawArguments: mcpServer.CallToolRequest['params']['arguments'] & { _meta?: Record<string, any> } = {}, signal?: AbortSignal): Promise<BrowserCallResult> {
     const json = !!rawArguments._meta?.json;
     const formatError = (message: string): mcpServer.CallToolResult => ({
       content: [{ type: 'text' as const, text: json ? JSON.stringify({ isError: true, error: message }, null, 2) : `### Error\n${message}` }],
@@ -136,7 +155,7 @@ export class BrowserBackend implements ServerBackend {
     const context = this._context!;
     const response = new Response(context, name, parsedArguments, { relativeTo: cwd, raw, json });
     context.setRunningTool(name);
-    let responseObject: mcpServer.CallToolResult & { isClose?: boolean };
+    let responseObject: BrowserCallResult;
     const actionStartedAt = performance.now();
     let actionFinishedAt = actionStartedAt;
     try {
@@ -145,8 +164,8 @@ export class BrowserBackend implements ServerBackend {
       for (const reason of context.drainPendingUnhandledRejections())
         response.addError(formatRejectionReason(reason));
       responseObject = await response.serialize();
-      (responseObject as any)._meta = {
-        ...(responseObject as any)._meta,
+      responseObject._meta = {
+        ...responseObject._meta,
         tyrsTiming: {
           pageActionMs: Math.round((actionFinishedAt - actionStartedAt) * 100) / 100,
           ...response.timings(),
@@ -157,6 +176,11 @@ export class BrowserBackend implements ServerBackend {
     } catch (error: any) {
       const messages = [String(error), ...context.drainPendingUnhandledRejections().map(formatRejectionReason)];
       responseObject = formatError(messages.join('\n\n'));
+      if (error instanceof BrowserMetadataUnavailableError) {
+        debug('pw:tools:error')(`browser metadata unavailable stage=${error.stage} durationMs=${error.durationMs}`);
+        this._tabMetadataProvider?.invalidate(error.code);
+        responseObject.isClose = true;
+      }
     } finally {
       context.setRunningTool(undefined);
     }
