@@ -272,7 +272,7 @@ function classifyBrowserError(message: string): BrowserFailure {
   }
   if (normalized.includes('control_interrupted') || normalized.includes('control was interrupted')) {
     return { code: 'BROWSER_CONTROL_INTERRUPTED', message, recoverable: true,
-      recoveryAction: '调用 browser_tabs list，并使用新的 claimToken 显式认领用户标签页' };
+      recoveryAction: '本次操作被用户输入打断；重新观察页面后继续' };
   }
   if (normalized.includes('timed out') || normalized.includes('timeout') || normalized.includes('deadline')) {
     return { code: 'TOOL_TIMEOUT', message, recoverable: true,
