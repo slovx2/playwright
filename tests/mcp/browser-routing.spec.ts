@@ -111,6 +111,31 @@ test('concurrent calls share one session backend per selected browser', async ()
   expect(factories).toBe(1);
 });
 
+test('browser generation change reconnects the selected backend', async () => {
+  let generation = 0;
+  let factories = 0;
+  let disposals = 0;
+  const routing = new RoutingBrowserBackend({
+    worker: async () => {
+      const id = ++factories;
+      return { initialize: async () => {}, dispose: async () => { disposals++; },
+        callTool: async () => ({ content: [{ type: 'text' as const, text: `worker-${id}` }] }) } as any;
+    },
+    desktop: async () => { throw new Error('must not be called'); },
+  }, {
+    worker: () => ({ available: true, label: 'worker browser', generation }),
+    desktop: () => ({ available: false, label: 'desktop browser' }),
+  });
+  await routing.initialize({ cwd: process.cwd(), clientName: 'test', scope: 'worker' });
+  const first = await routing.callTool('browser_snapshot', {});
+  generation++;
+  const second = await routing.callTool('browser_snapshot', {});
+  expect(first.content[0].type === 'text' && first.content[0].text).toBe('worker-1');
+  expect(second.content[0].type === 'text' && second.content[0].text).toBe('worker-2');
+  expect(factories).toBe(2);
+  expect(disposals).toBe(1);
+});
+
 test('dispose finalizes every initialized browser backend', async () => {
   const calls: string[] = [];
   const makeBackend = (id: string) => ({

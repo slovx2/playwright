@@ -62,6 +62,7 @@ type BackendFactory = () => Promise<ServerBackend>;
 type Availability = () => {
   available: boolean;
   label: string;
+  generation?: number;
   reason?: string;
   version?: string;
   capabilities?: string[];
@@ -70,6 +71,7 @@ type Availability = () => {
 
 export class RoutingBrowserBackend implements ServerBackend {
   private readonly _backends = new Map<BrowserId, Promise<ServerBackend>>();
+  private readonly _backendGenerations = new Map<BrowserId, number>();
   private readonly _currentTabIds = new Map<BrowserId, string>();
   private _selected: BrowserId = 'worker';
   private _clientInfo?: ClientInfo;
@@ -93,6 +95,7 @@ export class RoutingBrowserBackend implements ServerBackend {
       await backend?.dispose?.().catch(() => {});
     }));
     this._backends.clear();
+    this._backendGenerations.clear();
     if (this._clientInfo && this._taskId)
       await this._services?.releaseTask(this._clientInfo.scope, this._taskId);
   }
@@ -153,6 +156,15 @@ export class RoutingBrowserBackend implements ServerBackend {
 
   private async _backend(browser: BrowserId): Promise<ServerBackend> {
     let promise = this._backends.get(browser);
+    const generation = this._availability[browser]().generation;
+    const backendGeneration = this._backendGenerations.get(browser);
+    if (promise && generation !== undefined && backendGeneration !== undefined && generation !== backendGeneration) {
+      this._backends.delete(browser);
+      this._backendGenerations.delete(browser);
+      const staleBackend = await promise.catch(() => undefined);
+      await staleBackend?.dispose?.().catch(() => {});
+      promise = undefined;
+    }
     if (!promise) {
       promise = (async () => {
         const backend = await this._factories[browser]();
@@ -165,11 +177,16 @@ export class RoutingBrowserBackend implements ServerBackend {
         }
       })().catch(error => {
         this._backends.delete(browser);
+        this._backendGenerations.delete(browser);
         throw error;
       });
       this._backends.set(browser, promise);
     }
-    return await promise;
+    const backend = await promise;
+    const currentGeneration = this._availability[browser]().generation;
+    if (currentGeneration !== undefined)
+      this._backendGenerations.set(browser, currentGeneration);
+    return backend;
   }
 
   private _select(rawArguments: mcpServer.CallToolRequest['params']['arguments']): mcpServer.CallToolResult {

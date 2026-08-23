@@ -205,6 +205,7 @@ async function startRoutingServer(config: FullConfig, options: any, tools: Tool[
   let workerPromise: Promise<playwright.Browser> | undefined;
   let workerReady = false;
   let workerError = '';
+  let workerGeneration = 0;
 
   const ensureWorker = (clientInfo: ClientInfo): Promise<playwright.Browser> => {
     if (!workerPromise) {
@@ -216,6 +217,7 @@ async function startRoutingServer(config: FullConfig, options: any, tools: Tool[
         browser.on('disconnected', () => {
           workerReady = false;
           workerPromise = undefined;
+          workerGeneration++;
         });
         return browser;
       }).catch(error => {
@@ -228,8 +230,6 @@ async function startRoutingServer(config: FullConfig, options: any, tools: Tool[
     return workerPromise;
   };
 
-  const prewarmClient: ClientInfo = { clientName: 'Tyrs Browser Bridge', cwd: process.cwd(), scope: 'worker' };
-  void ensureWorker(prewarmClient).catch(error => testDebug(`failed to prewarm worker browser: ${error}`));
   const serviceRoot = process.env.TYRS_BROWSER_SERVICES_ROOT || '';
   const services = new BrowserServiceManager(serviceRoot, registry);
   registry.onGenerationChanged(scope => void services.closeBrowserScope(scope, 'desktop'));
@@ -252,10 +252,13 @@ async function startRoutingServer(config: FullConfig, options: any, tools: Tool[
       },
     }, {
       worker: () => ({
-        available: workerReady || Boolean(workerPromise),
+        available: true,
         label: 'Worker browser',
-        reason: workerReady || workerPromise ? undefined :
-          `Worker browser 进程不可用${workerError ? `：${workerError}` : ''}`,
+        generation: workerGeneration,
+        details: {
+          status: workerReady ? 'ready' : workerPromise ? 'starting' : 'stopped',
+          ...(workerError ? { lastError: workerError } : {}),
+        },
         version,
         capabilities: ['local-execution', 'isolated-context', 'downloads', 'snapshot', 'screenshot', 'batch', 'loopback-service-tunnel'],
       }),

@@ -18,6 +18,7 @@ import debug from 'debug';
 import { createHttpServer, startHttpServer } from '@utils/network';
 import { playwright } from '../../inprocess';
 import { CDPRelayServer } from './cdpRelay';
+import { ensureExtensionBrowserRunning } from './extensionBrowserLauncher';
 
 import type * as playwrightTypes from '../../..';
 import type { TabMetadataProvider } from '../backend/tabMetadata';
@@ -39,6 +40,7 @@ export async function createExtensionBrowser(channel: string, executablePath: st
   debugLogger(`CDP relay server started, extension endpoint: ${relay.extensionEndpoint()}.`);
 
   try {
+    await ensureExtensionBrowserRunning(channel, executablePath);
     await relay.establishExtensionConnection(clientName);
     const browser = await playwright.chromium.connectOverCDP(relay.cdpEndpoint(), { isLocal: true, timeout: 0 });
     metadataProviders.set(browser, {
