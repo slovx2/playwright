@@ -145,12 +145,16 @@ export class SessionController {
       allowInternalBlank: true,
       expiresAt: Date.now() + 15_000,
     });
-    await this._claim(tab, sessionId, 'agent');
-    await this._group(tab.id, sessionId);
-    if (url && url !== initialUrl && isDebuggableURL(url)) {
-      tab = await chrome.tabs.update(tab.id, { url });
+    try {
+      await this._claim(tab, sessionId, 'agent');
+      await this._group(tab.id, sessionId);
+      if (url && url !== initialUrl && isDebuggableURL(url))
+        tab = await chrome.tabs.update(tab.id, { url });
+      return tab;
+    } catch (error) {
+      await this._rollbackCreatedTab(tab.id, sessionId);
+      throw error;
     }
-    return tab;
   }
 
   async describeTab(tabId: number, title: string, url: string): Promise<{
@@ -406,13 +410,39 @@ export class SessionController {
 
   private async _group(tabId: number, sessionId: string): Promise<void> {
     const session = this._state.sessions[sessionId];
-    const groupId = await chrome.tabs.group({
-      tabIds: tabId,
-      ...(session.groupId === undefined ? {} : { groupId: session.groupId }),
+    let requestedGroupId = session.groupId;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const groupId = await chrome.tabs.group({
+          tabIds: tabId,
+          ...(requestedGroupId === undefined ? {} : { groupId: requestedGroupId }),
+        });
+        await chrome.tabGroups.update(groupId, { title: session.name, color: 'blue', collapsed: false });
+        session.groupId = groupId;
+        await this._persist();
+        return;
+      } catch (error) {
+        if (requestedGroupId === undefined || attempt === 1 || !isMissingTabGroupError(error))
+          throw error;
+        requestedGroupId = undefined;
+        delete session.groupId;
+        await this._persist();
+      }
+    }
+    throw new Error('Failed to create or recover browser tab group');
+  }
+
+  private async _rollbackCreatedTab(tabId: number, sessionId: string): Promise<void> {
+    const lease = this._state.leases[String(tabId)];
+    if (!lease || lease.sessionId !== sessionId || lease.origin !== 'agent')
+      return;
+    await this.removeTabs(tabId).catch(async () => {
+      delete this._state.leases[String(tabId)];
+      delete this._state.retainedTabs[String(tabId)];
+      if (this._state.sessions[sessionId]?.currentTabId === tabId)
+        delete this._state.sessions[sessionId].currentTabId;
+      await this._persist();
     });
-    session.groupId = groupId;
-    await chrome.tabGroups.update(groupId, { title: session.name, color: 'blue', collapsed: false });
-    await this._persist();
   }
 
   private _currentTab(sessionId: string): number | undefined {
@@ -593,8 +623,12 @@ export class SessionController {
     const existing = this._state.leases[String(tab.id)];
     if (existing)
       return;
-    await this._claim(tab, openerLease.sessionId, 'agent');
-    await this._group(tab.id, openerLease.sessionId);
+    try {
+      await this._claim(tab, openerLease.sessionId, 'agent');
+      await this._group(tab.id, openerLease.sessionId);
+    } catch {
+      await this._rollbackCreatedTab(tab.id, openerLease.sessionId);
+    }
   }
 
   private async _onCommittedNavigation(details: chrome.webNavigation.WebNavigationTransitionCallbackDetails):
@@ -665,4 +699,8 @@ function normalizeNavigationUrl(value: string | undefined): string {
   } catch {
     return value;
   }
+}
+
+function isMissingTabGroupError(error: unknown): boolean {
+  return /no group with id/i.test(error instanceof Error ? error.message : String(error));
 }

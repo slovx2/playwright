@@ -372,6 +372,57 @@ test('creates background grouped tabs and reports user takeover for the leased t
   assert.equal(messages.some(message => (message as any).method === 'tyrs.takeover'), true);
 });
 
+test('recreates a tab group when the persisted group id is stale', async () => {
+  const sessionId = '11111111-1111-4111-8111-111111111111';
+  (chrome.storage.session as any).get = spy({
+    tyrsBrowserSessionsV2: {
+      sessions: { [sessionId]: { name: 'Recovered', groupId: 41 } },
+      leases: {},
+      retainedTabs: {},
+    },
+  });
+  const groupCalls: unknown[][] = [];
+  let first = true;
+  (chrome.tabs as any).group = async (...args: unknown[]) => {
+    groupCalls.push(args);
+    if (first) {
+      first = false;
+      throw new Error('No group with id 41');
+    }
+    return 42;
+  };
+  const protocol = handler();
+  await protocol.handleCommand({ id: 1, method: 'tyrs.session.open',
+    params: [{ sessionId, name: 'Recovered', bootstrapUrl }] });
+  await protocol.handleCommand({ id: 2, method: 'chrome.tabs.create', params: [{}] });
+  assert.deepEqual(groupCalls, [[{ tabIds: 9, groupId: 41 }], [{ tabIds: 9 }]]);
+  assert.deepEqual((chrome.tabGroups.update as any).calls.at(-1), [42,
+    { title: 'Recovered', color: 'blue', collapsed: false }]);
+});
+
+test('rolls back a newly created tab when tab-group recovery fails', async () => {
+  const sessionId = '11111111-1111-4111-8111-111111111111';
+  (chrome.storage.session as any).get = spy({
+    tyrsBrowserSessionsV2: {
+      sessions: { [sessionId]: { name: 'Rollback', groupId: 41 } },
+      leases: {},
+      retainedTabs: {},
+    },
+  });
+  (chrome.tabs as any).group = async () => {
+    throw new Error('No group with id 41');
+  };
+  const protocol = handler();
+  await protocol.handleCommand({ id: 1, method: 'tyrs.session.open',
+    params: [{ sessionId, name: 'Rollback', bootstrapUrl }] });
+  await assert.rejects(protocol.handleCommand({ id: 2, method: 'chrome.tabs.create', params: [{}] }),
+      /No group with id 41/);
+  assert.deepEqual(remove.calls, [[9]]);
+  (chrome.tabs.query as any) = spy([{ id: 9, url: 'about:blank', title: '' }]);
+  const discovered = await protocol.handleCommand({ id: 3, method: 'tyrs.tabs.discover', params: [] }) as any[];
+  assert.deepEqual(discovered[0].tyrs, {});
+});
+
 test('address bar navigation interrupts even immediately after agent navigation', async () => {
   const messages: unknown[] = [];
   const protocol = handler(messages);
