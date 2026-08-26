@@ -72,6 +72,7 @@ export class BrowserAgentRegistry implements DesktopServiceProvider {
   constructor(
     private readonly _secret: Buffer,
     private readonly _versions: { bridgeVersion: string, agentVersion: string, extensionVersion: string },
+    private readonly _toolTimeoutMs?: number,
   ) {}
 
   static async startFromEnv(): Promise<BrowserAgentRegistry | undefined> {
@@ -167,7 +168,8 @@ export class BrowserAgentRegistry implements DesktopServiceProvider {
           (serviceId, activeConnections) => {
             for (const listener of this._serviceActivityListeners)
               listener(scope, serviceId, activeConnections);
-          });
+          },
+          this._toolTimeoutMs);
       this._connections.get(scope)?.close();
       this._connections.set(scope, connection);
       socket.write(browserAgentPreface);
@@ -218,6 +220,7 @@ class AgentConnection {
     private readonly _versions: { bridgeVersion: string, agentVersion: string, extensionVersion: string },
     private readonly _onChange: () => void,
     private readonly _onServiceActivity: (serviceId: string, activeConnections: number) => void,
+    private readonly _toolTimeoutMs?: number,
   ) {}
 
   start(): void {
@@ -271,7 +274,7 @@ class AgentConnection {
     if (this._closed || !this.available())
       throw new Error('桌面端浏览器不可用');
     const requestId = crypto.randomUUID();
-    const timeoutMs = name === 'browser_batch' ? 125_000 : 65_000;
+    const timeoutMs = this._toolTimeoutMs ?? (name === 'browser_batch' ? 125_000 : 65_000);
     return await new Promise(async (resolve, reject) => {
       const timer = setTimeout(() => {
         const current = this._pendingCalls.get(requestId);
@@ -279,7 +282,7 @@ class AgentConnection {
         this._dropToolArtifacts(requestId);
         if (current?.signal && current.onAbort)
           current.signal.removeEventListener('abort', current.onAbort);
-        void this._framed.send({ type: 'tool_cancel', sessionId, requestId, reason: 'deadline' }).catch(() => {});
+        void this._framed.send({ type: 'tool_cancel', sessionId, requestId, generation: this.generation, reason: 'deadline' }).catch(() => {});
         reject(new Error('Desktop browser tool timed out'));
       }, timeoutMs);
       const pending: PendingCall = { sessionId, resolve, reject, timer, signal, startedAt: performance.now() };
@@ -289,7 +292,7 @@ class AgentConnection {
           clearTimeout(timer);
           this._dropToolArtifacts(requestId);
           signal?.removeEventListener('abort', onAbort);
-          void this._framed.send({ type: 'tool_cancel', sessionId, requestId, reason: 'cancelled' }).catch(() => {});
+          void this._framed.send({ type: 'tool_cancel', sessionId, requestId, generation: this.generation, reason: 'cancelled' }).catch(() => {});
           reject(signal?.reason instanceof Error ? signal.reason : new Error('Desktop browser tool was cancelled'));
         }
       };

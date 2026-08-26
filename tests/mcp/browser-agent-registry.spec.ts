@@ -79,7 +79,11 @@ test('Browser Agent registry verifies scoped tokens and atomically receives desk
     const cancelledCall = await wire.next('tool_call');
     controller.abort(new Error('test cancellation'));
     await expect(cancelled).rejects.toThrow('test cancellation');
-    expect((await wire.next('tool_cancel')).requestId).toBe(cancelledCall.requestId);
+    expect(await wire.next('tool_cancel')).toMatchObject({
+      requestId: cancelledCall.requestId,
+      generation: cancelledCall.generation,
+      reason: 'cancelled',
+    });
     await wire.send({ type: 'tool_result', sessionId: cancelledCall.sessionId,
       requestId: cancelledCall.requestId, result: { content: [{ type: 'text', text: 'late' }] } });
 
@@ -108,6 +112,44 @@ test('Browser Agent registry verifies scoped tokens and atomically receives desk
     expect(registry.createBackend(scope)).toBeTruthy();
   } finally {
     replacement?.close();
+    wire.close();
+    await registry.close();
+  }
+});
+
+test('Browser Agent registry includes generation when a tool call times out', async ({}, testInfo) => {
+  const secret = Buffer.from('registry-timeout-secret');
+  const token = scopedToken(secret, scope);
+  const port = await freePort();
+  const versions = { bridgeVersion: '0.3.0', agentVersion: '0.2.0', extensionVersion: '0.3.0' };
+  const registry = new BrowserAgentRegistry(secret, versions, 10);
+  await registry.start('127.0.0.1', port);
+  const wire = await AgentWire.connect(port, token);
+  try {
+    await wire.send({ type: 'hello', protocol: 2, capabilityVersion: 2,
+      bridgeVersion: versions.bridgeVersion, agentVersion: versions.agentVersion,
+      capabilities: ['local-tool-execution', 'cancellation', 'sessions', 'artifacts', 'service-tunnels'] });
+    await wire.next('welcome');
+    await wire.send({ type: 'status', connected: true, agentVersion: versions.agentVersion,
+      extensionVersion: versions.extensionVersion, extensionProtocol: 2 });
+    await expect.poll(() => registry.status(scope).available).toBe(true);
+
+    const backend = registry.createBackend(scope);
+    await backend.initialize?.({ clientName: 'timeout test', cwd: testInfo.outputPath('workspace'), scope });
+    const session = await wire.next('session_open');
+    const timedOut = backend.callTool('browser_evaluate', { function: 'async () => new Promise(() => {})' });
+    const call = await wire.next('tool_call');
+    await expect(timedOut).rejects.toThrow('Desktop browser tool timed out');
+    expect(await wire.next('tool_cancel')).toMatchObject({
+      sessionId: session.sessionId,
+      requestId: call.requestId,
+      generation: call.generation,
+      reason: 'deadline',
+    });
+    expect(registry.status(scope).available).toBe(true);
+
+    await backend.dispose?.();
+  } finally {
     wire.close();
     await registry.close();
   }
