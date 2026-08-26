@@ -7,6 +7,13 @@ import { test, expect } from './fixtures';
 import { RoutingBrowserBackend } from '../../packages/playwright-core/src/tools/backend/routingBrowserBackend';
 import { redactSensitiveData } from '../../packages/playwright-core/src/tools/backend/context';
 import { readsSensitiveBrowserState } from '../../packages/playwright-core/src/tools/backend/evaluate';
+import { extensionBrowserLaunchArguments } from '../../packages/playwright-core/src/tools/mcp/extensionBrowserLauncher';
+
+test('root-owned Linux desktop launches Chrome without its sandbox', () => {
+  expect(extensionBrowserLaunchArguments('linux', 0)).toEqual(['--no-sandbox']);
+  expect(extensionBrowserLaunchArguments('linux', 1000)).toEqual([]);
+  expect(extensionBrowserLaunchArguments('darwin', 0)).toEqual([]);
+});
 
 test('browser selection is session scoped and routes subsequent calls', async () => {
   const calls: string[] = [];

@@ -28,13 +28,17 @@ export async function ensureExtensionBrowserRunning(channel: string, executableP
     return;
 
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(executable, [], { detached: true, stdio: 'ignore' });
+    const child = spawn(executable, extensionBrowserLaunchArguments(), { detached: true, stdio: 'ignore' });
     child.once('error', reject);
     child.once('spawn', () => {
       child.unref();
       resolve();
     });
   });
+}
+
+export function extensionBrowserLaunchArguments(platform: NodeJS.Platform = process.platform, uid = process.getuid?.()): string[] {
+  return platform === 'linux' && uid === 0 ? ['--no-sandbox'] : [];
 }
 
 function isExecutableRunning(executablePath: string): boolean {
