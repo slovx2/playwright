@@ -24,17 +24,25 @@ export async function ensureExtensionBrowserRunning(channel: string, executableP
   const executable = executablePath ?? registry.findExecutable(channel)?.executablePathOrDie('javascript');
   if (!executable)
     throw new Error(`Browser channel "${channel}" is not installed`);
-  if (process.platform === 'linux' && isExecutableRunning(executable))
-    return;
-
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(executable, extensionBrowserLaunchArguments(), { detached: true, stdio: 'ignore' });
-    child.once('error', reject);
-    child.once('spawn', () => {
-      child.unref();
-      resolve();
+  const attempts = process.platform === 'linux' ? 3 : 1;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (process.platform === 'linux' && isExecutableRunning(executable))
+      return;
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(executable, extensionBrowserLaunchArguments(), { detached: true, stdio: 'ignore' });
+      child.once('error', reject);
+      child.once('spawn', () => {
+        child.unref();
+        resolve();
+      });
     });
-  });
+    if (process.platform !== 'linux')
+      return;
+    await new Promise(resolve => setTimeout(resolve, 2_000));
+    if (isExecutableRunning(executable))
+      return;
+  }
+  throw new Error(`Browser channel "${channel}" exited during startup`);
 }
 
 export function extensionBrowserLaunchArguments(platform: NodeJS.Platform = process.platform, uid = process.getuid?.()): string[] {
