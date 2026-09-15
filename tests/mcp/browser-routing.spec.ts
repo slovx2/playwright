@@ -7,12 +7,23 @@ import { test, expect } from './fixtures';
 import { RoutingBrowserBackend } from '../../packages/playwright-core/src/tools/backend/routingBrowserBackend';
 import { redactSensitiveData } from '../../packages/playwright-core/src/tools/backend/context';
 import { readsSensitiveBrowserState } from '../../packages/playwright-core/src/tools/backend/evaluate';
-import { extensionBrowserLaunchArguments } from '../../packages/playwright-core/src/tools/mcp/extensionBrowserLauncher';
+import { extensionBrowserLaunchArguments, linuxDisplayNumber, pickLinuxDisplay } from '../../packages/playwright-core/src/tools/mcp/extensionBrowserLauncher';
 
 test('root-owned Linux desktop launches Chrome without its sandbox', () => {
   expect(extensionBrowserLaunchArguments('linux', 0)).toEqual(['--no-sandbox']);
   expect(extensionBrowserLaunchArguments('linux', 1000)).toEqual([]);
   expect(extensionBrowserLaunchArguments('darwin', 0)).toEqual([]);
+});
+
+test('Linux display detection prefers a live local X socket', () => {
+  expect(linuxDisplayNumber(':10.0')).toBe('10');
+  expect(linuxDisplayNumber('localhost:10.0')).toBeUndefined();
+  expect(pickLinuxDisplay([
+    { DISPLAY: ':1' },
+    { DISPLAY: ':10.0', XAUTHORITY: '/root/.Xauthority' },
+  ], ['X10'])).toEqual({ DISPLAY: ':10', XAUTHORITY: '/root/.Xauthority' });
+  expect(pickLinuxDisplay([{ DISPLAY: ':10', XAUTHORITY: '.Xauthority' }], ['X10'])).toEqual({ DISPLAY: ':10' });
+  expect(pickLinuxDisplay([{ DISPLAY: ':1' }], ['X10'])).toBeUndefined();
 });
 
 test('browser selection is session scoped and routes subsequent calls', async () => {
