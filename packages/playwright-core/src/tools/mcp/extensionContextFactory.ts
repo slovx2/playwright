@@ -40,8 +40,18 @@ export async function createExtensionBrowser(channel: string, executablePath: st
   debugLogger(`CDP relay server started, extension endpoint: ${relay.extensionEndpoint()}.`);
 
   try {
-    await ensureExtensionBrowserRunning(channel, executablePath);
-    await relay.establishExtensionConnection(clientName);
+    let launchFailure: string | undefined;
+    try {
+      await ensureExtensionBrowserRunning(channel, executablePath);
+    } catch (error) {
+      // A local Chrome is only one way to get the extension. Headless hosts and
+      // Chrome started by the user cannot be launched from here, so wait for
+      // that Chrome to connect before giving up.
+      launchFailure = error instanceof Error ? error.message : String(error);
+      debugLogger(`Cannot start ${channel} locally: ${launchFailure}`);
+    }
+    await relay.establishExtensionConnection(clientName, launchFailure ?
+      { timeoutMs: 30_000, reason: launchFailure } : undefined);
     const browser = await playwright.chromium.connectOverCDP(relay.cdpEndpoint(), { isLocal: true, timeout: 0 });
     metadataProviders.set(browser, {
       listTabs: async () => (await relay.discoverTabs()).tabs.map(tab => ({

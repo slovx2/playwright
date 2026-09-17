@@ -148,10 +148,21 @@ export class CDPRelayServer {
     this._closeCDPConnection(reason);
   }
 
-  async establishExtensionConnection(_clientName: string) {
+  async establishExtensionConnection(_clientName: string, wait?: { timeoutMs: number, reason: string }) {
     debugLogger('Establishing extension connection');
     debugLogger('Waiting for incoming extension connection');
-    await this._extensionConnectionPromise;
+    if (!wait) {
+      await this._extensionConnectionPromise;
+    } else {
+      // The browser could not be started locally, so the extension has to come
+      // from a Chrome that is already running. Wait a bounded while for it and
+      // report why the local browser was unavailable.
+      await Promise.race([
+        this._extensionConnectionPromise,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error(
+            `Browser extension did not connect within ${wait.timeoutMs}ms: ${wait.reason}`)), wait.timeoutMs)),
+      ]);
+    }
     await this._handler.ready();
     debugLogger('Extension connection established');
   }
