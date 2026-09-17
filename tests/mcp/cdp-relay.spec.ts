@@ -76,3 +76,44 @@ function restoreEnv(name: string, value: string | undefined): void {
   else
     process.env[name] = value;
 }
+
+test('CDP relay fails an extension command that is never answered', async () => {
+  const previous = {
+    token: process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN,
+    version: process.env.PLAYWRIGHT_MCP_EXTENSION_VERSION,
+    protocol: process.env.PLAYWRIGHT_EXTENSION_PROTOCOL,
+    capability: process.env.PLAYWRIGHT_MCP_EXTENSION_CAPABILITY_VERSION,
+    timeout: process.env.PLAYWRIGHT_EXTENSION_COMMAND_TIMEOUT_MS,
+  };
+  process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN = 'test-token';
+  process.env.PLAYWRIGHT_MCP_EXTENSION_VERSION = '0.3.3';
+  process.env.PLAYWRIGHT_EXTENSION_PROTOCOL = '2';
+  process.env.PLAYWRIGHT_MCP_EXTENSION_CAPABILITY_VERSION = '1';
+  process.env.PLAYWRIGHT_EXTENSION_COMMAND_TIMEOUT_MS = '250';
+
+  const server = http.createServer();
+  await new Promise<void>((resolve, reject) =>
+    server.listen(0, '127.0.0.1', resolve).once('error', reject));
+  const relay = new CDPRelayServer(server, 'chrome');
+  try {
+    const profile = new WebSocket(
+        `${relay.extensionEndpoint()}?token=test-token&extensionVersion=0.3.3&extensionProtocol=2&capabilityVersion=1`);
+    await new Promise<void>((resolve, reject) => {
+      profile.once('open', resolve);
+      profile.once('error', reject);
+    });
+    // A blocked renderer keeps the extension silent, so the relay must give up
+    // instead of holding the command and the tool call that awaits it forever.
+    await expect(relay.extensionCommand('tyrs.sessions.reset', []))
+        .rejects.toThrow(/timed out after 250ms/);
+    profile.close(1000, 'test finished');
+  } finally {
+    relay.stop();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    restoreEnv('PLAYWRIGHT_MCP_EXTENSION_TOKEN', previous.token);
+    restoreEnv('PLAYWRIGHT_MCP_EXTENSION_VERSION', previous.version);
+    restoreEnv('PLAYWRIGHT_EXTENSION_PROTOCOL', previous.protocol);
+    restoreEnv('PLAYWRIGHT_MCP_EXTENSION_CAPABILITY_VERSION', previous.capability);
+    restoreEnv('PLAYWRIGHT_EXTENSION_COMMAND_TIMEOUT_MS', previous.timeout);
+  }
+});

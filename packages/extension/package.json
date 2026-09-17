@@ -1,6 +1,6 @@
 {
   "name": "@playwright/extension",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "Tyrs Browser Extension",
   "private": true,
   "repository": {

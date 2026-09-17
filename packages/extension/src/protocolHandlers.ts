@@ -38,11 +38,34 @@ const allowedChromeCommands = new Set([
   'tyrs.visibility',
 ]);
 
+/**
+ * Commands that talk to the debuggee renderer. They stop responding when the
+ * renderer is blocked, for example by a JavaScript dialog that Chrome has not
+ * surfaced yet, or by long running page script.
+ */
+const boundedDebuggerCommands = new Set([
+  'chrome.debugger.attach',
+  'chrome.debugger.sendCommand',
+]);
+
+/**
+ * Without a bound a blocked renderer keeps `chrome.debugger.sendCommand`
+ * pending forever. Every later command for the same tab then queues behind it
+ * and the whole browser session looks hung, so fail the command instead.
+ */
+const defaultDebuggerCommandTimeoutMs = 60_000;
+
+export type ProtocolV2HandlerOptions = {
+  debuggerCommandTimeoutMs?: number;
+};
+
 export class ProtocolV2Handler {
   private readonly _sessions: SessionController;
   private readonly _debuggerQueues = new Map<number, Promise<void>>();
+  private readonly _debuggerCommandTimeoutMs: number;
 
-  constructor(private readonly _context: RelayContext) {
+  constructor(private readonly _context: RelayContext, options: ProtocolV2HandlerOptions = {}) {
+    this._debuggerCommandTimeoutMs = options.debuggerCommandTimeoutMs ?? defaultDebuggerCommandTimeoutMs;
     this._sessions = new SessionController(message => this._context.sendMessage(message));
   }
 
@@ -54,16 +77,19 @@ export class ProtocolV2Handler {
     const args = (message.params ?? []) as unknown[];
     const target = args[0] as chrome.debugger.DebuggerSession | undefined;
     const result = message.method === 'chrome.debugger.sendCommand' && target?.tabId !== undefined ?
-      await this._enqueueDebuggerCommand(target.tabId, () => this._invoke(message.method, args)) :
-      await this._invoke(message.method, args);
+      await this._enqueueDebuggerCommand(target.tabId, () => this._boundedInvoke(message.method, args)) :
+      await this._boundedInvoke(message.method, args);
     if (message.method === 'chrome.debugger.attach') {
       const target = args[0] as chrome.debugger.Debuggee | undefined;
       if (target?.tabId !== undefined)
         this._context.notifyTabAttached(target.tabId);
     } else if (message.method === 'chrome.debugger.detach') {
       const target = args[0] as chrome.debugger.Debuggee | undefined;
-      if (target?.tabId !== undefined)
+      if (target?.tabId !== undefined) {
+        // A detach invalidates anything the queue may still be waiting on.
+        this._debuggerQueues.delete(target.tabId);
         this._context.notifyTabDetached(target.tabId);
+      }
     }
     return result ?? {};
   }
@@ -78,6 +104,13 @@ export class ProtocolV2Handler {
 
   forwardChromeEvent(fullMethod: string, args: unknown[]): void {
     this._context.sendMessage({ method: fullMethod, params: args });
+  }
+
+  private async _boundedInvoke(method: string, args: unknown[]): Promise<unknown> {
+    if (!boundedDebuggerCommands.has(method))
+      return await this._invoke(method, args);
+    return await withTimeout(this._invoke(method, args), this._debuggerCommandTimeoutMs,
+        `${method} timed out after ${this._debuggerCommandTimeoutMs}ms`);
   }
 
   onUserAttachRequest(tab: chrome.tabs.Tab): void {
@@ -192,4 +225,19 @@ async function invokeChromeMethod(fullMethod: string, args: unknown[]): Promise<
   if (typeof method !== 'function')
     throw new Error(`Not a function: ${fullMethod}`);
   return await method.apply(obj, args);
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined)
+      clearTimeout(timer);
+  }
 }

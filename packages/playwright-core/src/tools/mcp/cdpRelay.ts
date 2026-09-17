@@ -43,6 +43,23 @@ import type { WebSocket, WebSocketServer } from 'ws';
 
 const debugLogger = debug('pw:mcp:relay');
 
+/**
+ * An extension command may never be answered, for example when the target
+ * renderer is blocked and `chrome.debugger.sendCommand` stays pending forever.
+ * Without a bound the CDP command and the tool call that awaits it never settle,
+ * so the MCP client keeps the request in flight and the whole browser session
+ * looks hung. Fail the command instead of waiting forever.
+ */
+const defaultExtensionCommandTimeoutMs = 90_000;
+
+function extensionCommandTimeoutMs(): number {
+  const raw = process.env.PLAYWRIGHT_EXTENSION_COMMAND_TIMEOUT_MS;
+  if (raw === undefined || raw.trim() === '')
+    return defaultExtensionCommandTimeoutMs;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : defaultExtensionCommandTimeoutMs;
+}
+
 type CDPCommand = {
   id: number;
   sessionId?: string;
@@ -322,8 +339,27 @@ class ExtensionConnection {
     const id = ++this._lastId;
     this._ws.send(JSON.stringify({ id, method, params }));
     const error = new Error(`Protocol error: ${method}`);
+    const timeoutMs = extensionCommandTimeoutMs();
     return new Promise((resolve, reject) => {
-      this._callbacks.set(id, { resolve, reject, error });
+      const timer = timeoutMs ? setTimeout(() => {
+        if (!this._callbacks.delete(id))
+          return;
+        debugLogger(`Extension command timed out after ${timeoutMs}ms:`, method);
+        reject(new Error(`Protocol error: ${method} timed out after ${timeoutMs}ms`));
+      }, timeoutMs) : undefined;
+      this._callbacks.set(id, {
+        resolve: value => {
+          if (timer !== undefined)
+            clearTimeout(timer);
+          resolve(value);
+        },
+        reject: reason => {
+          if (timer !== undefined)
+            clearTimeout(timer);
+          reject(reason);
+        },
+        error,
+      });
     });
   }
 

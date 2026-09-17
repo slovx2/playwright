@@ -78,13 +78,14 @@ beforeEach(() => {
   } as unknown as typeof chrome;
 });
 
-function handler(messages: unknown[] = [], attached: number[] = [], detached: number[] = []) {
+function handler(messages: unknown[] = [], attached: number[] = [], detached: number[] = [],
+  options: { debuggerCommandTimeoutMs?: number } = {}) {
   return new ProtocolV2Handler({
     attachedTabs: new Set(),
     sendMessage: message => messages.push(message),
     notifyTabAttached: tabId => attached.push(tabId),
     notifyTabDetached: tabId => detached.push(tabId),
-  });
+  }, options);
 }
 
 test('allows only the fixed command set and records debugger attachment', async () => {
@@ -471,4 +472,34 @@ test('waits for tab removal before allowing a recycled id to be leased', async (
     (message as any).params?.[0]?.sessionId === second), false);
   await protocol.handleCommand({ id: 6, method: 'tyrs.visibility',
     params: [{ sessionId: second, visible: true }] });
+});
+
+test('fails a debugger command stuck on a blocked renderer instead of queueing forever', async () => {
+  const protocol = handler([], [], [], { debuggerCommandTimeoutMs: 50 });
+  let stuck = true;
+  (chrome.debugger as any).sendCommand = async () => {
+    if (stuck)
+      return await new Promise(() => {});
+    return { result: true };
+  };
+  await assert.rejects(
+      protocol.handleCommand({ id: 1, method: 'chrome.debugger.sendCommand',
+        params: [{ tabId: 7 }, 'Page.handleJavaScriptDialog', { accept: true }] }),
+      /chrome\.debugger\.sendCommand timed out after 50ms/);
+  // The tab queue must advance once the stuck command gave up.
+  stuck = false;
+  assert.deepEqual(await protocol.handleCommand({ id: 2, method: 'chrome.debugger.sendCommand',
+    params: [{ tabId: 7 }, 'Page.navigate', { url: 'about:blank' }] }), { result: true });
+});
+
+test('drops the pending queue for a tab once the debugger detaches', async () => {
+  const protocol = handler([], [], [], { debuggerCommandTimeoutMs: 50 });
+  (chrome.debugger as any).sendCommand = async () => await new Promise(() => {});
+  const detached = protocol.handleCommand({ id: 1, method: 'chrome.debugger.sendCommand',
+    params: [{ tabId: 7 }, 'Page.handleJavaScriptDialog', { accept: true }] });
+  await protocol.handleCommand({ id: 2, method: 'chrome.debugger.detach', params: [{ tabId: 7 }] });
+  (chrome.debugger as any).sendCommand = async () => ({ result: true });
+  assert.deepEqual(await protocol.handleCommand({ id: 3, method: 'chrome.debugger.sendCommand',
+    params: [{ tabId: 7 }, 'Page.navigate', { url: 'about:blank' }] }), { result: true });
+  await assert.rejects(detached, /timed out after 50ms/);
 });
