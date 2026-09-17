@@ -16,7 +16,7 @@ export type BrowserId = 'worker' | 'desktop';
 export const browserSelectSchema: ToolSchema<any> = {
   name: 'browser_select',
   title: 'Select browser',
-  description: 'Show or select the browser used by subsequent Playwright tools and loopback service tunnels. Default to worker.',
+  description: 'Show or select the browser used by subsequent Playwright tools and loopback service tunnels. Default to worker. Desktop is available.',
   inputSchema: z.object({
     browser: z.enum(['worker', 'desktop']).optional().describe('Browser to select. Omit to show the current selection and availability.'),
   }),
