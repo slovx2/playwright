@@ -123,7 +123,6 @@ export class Context {
   private _pageMetadataMapPromise: Promise<Map<playwrightTypes.Page, TabMetadata>> | undefined;
   private _primedTabMetadata: TabMetadata[] | undefined;
   private _lastTabMetadata: TabMetadata[] | undefined;
-  private _creatingPage = false;
   private _sessionName = '🌐 Browser task';
   private _routes: RouteEntry[] = [];
   private _video: {
@@ -234,13 +233,8 @@ export class Context {
 
   async newTab(): Promise<Tab> {
     const browserContext = await this.ensureBrowserContext();
-    this._creatingPage = true;
-    let page: playwrightTypes.Page;
-    try {
-      page = await browserContext.newPage();
-    } finally {
-      this._creatingPage = false;
-    }
+    // 用 newPage 的返回值归属标签，避免并发创建时认领其他会话的 page 事件。
+    const page = await browserContext.newPage();
     if (!this._tabs.some(tab => tab.page === page))
       this._onPageCreated(page);
     this._currentTab = this._tabs.find(t => t.page === page)!;
@@ -465,10 +459,6 @@ export class Context {
   }
 
   private async _considerPageCreated(page: playwrightTypes.Page): Promise<void> {
-    if (this._creatingPage) {
-      this._onPageCreated(page);
-      return;
-    }
     const opener = await page.opener().catch(() => null);
     if (opener && this._tabs.some(tab => tab.page === opener)) {
       this._onPageCreated(page, { origin: 'agent', disposition: 'omit' });

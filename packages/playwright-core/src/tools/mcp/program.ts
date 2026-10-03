@@ -244,6 +244,8 @@ async function startRoutingServer(config: FullConfig, options: any, tools: Tool[
         ...config,
         protectSensitiveData: true,
         defaultTabOrigin: 'agent',
+        // 共享浏览器连接，但每个 MCP 会话只管理自己创建或认领的标签。
+        isolatedTabs: true,
       }, tools, await ensureWorker(clientInfo)),
       desktop: async () => {
         if (clientInfo.scope === 'worker')
@@ -285,6 +287,7 @@ async function startRoutingServer(config: FullConfig, options: any, tools: Tool[
 function createBackend(config: FullConfig & {
   protectSensitiveData?: boolean;
   defaultTabOrigin?: 'agent' | 'user';
+  isolatedTabs?: boolean;
 }, tools: Tool[], browser: playwright.Browser): BrowserBackend {
   const browserContext = browser.contexts()[0];
   if (!browserContext)
