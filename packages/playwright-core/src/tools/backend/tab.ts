@@ -71,6 +71,10 @@ type RequestLogEntry = {
 
 type EventEntry = ConsoleLogEntry | DownloadStartLogEntry | DownloadFinishLogEntry | RequestLogEntry;
 
+// 会话可能长期停在高频请求的页面上，只保留最近的记录，避免无限增长。
+export const maxCollectedRequests = 1000;
+export const maxRecentEventEntries = 1000;
+
 
 export type TabHeader = {
   id: string;
@@ -150,6 +154,15 @@ export class Tab extends EventEmitter<TabEventsInterface> {
   async dispose() {
     await disposeAll(this._disposables);
     this._consoleLog.stop();
+    // 共享浏览器里的 page 在会话结束后仍可能存活，释放本会话收集的记录，并解除 page 对 Tab 的引用。
+    this._downloads.length = 0;
+    this._requests.length = 0;
+    this._recentEventEntries.length = 0;
+    this._modalStates = [];
+    // eslint-disable-next-line no-restricted-syntax
+    const page = this.page as any;
+    if (page[tabSymbol] === this)
+      delete page[tabSymbol];
   }
 
   async waitForInitialized() {
@@ -177,7 +190,7 @@ export class Tab extends EventEmitter<TabEventsInterface> {
       this._handleConsoleMessage(message);
     const requests = await this.page.requests().catch(() => []);
     for (const request of requests.filter(r => r.existingResponse() || r.failure()))
-      this._requests.push(request);
+      this._pushRequest(request);
     for (const initPage of this.context.config.browser?.initPage || []) {
       try {
         const { default: func } = require(initPage);
@@ -240,8 +253,14 @@ export class Tab extends EventEmitter<TabEventsInterface> {
     this._consoleLog = new LogFile(this.context, wallTime, 'console', 'Console');
   }
 
-  private _handleRequest(request: playwright.Request) {
+  private _pushRequest(request: playwright.Request) {
     this._requests.push(request);
+    if (this._requests.length > maxCollectedRequests)
+      this._requests.shift();
+  }
+
+  private _handleRequest(request: playwright.Request) {
+    this._pushRequest(request);
     // TODO: request start time is not available for fetch() before the
     // response is received, so we use Date.now() as a fallback.
     const wallTime = request.timing().startTime || Date.now();
@@ -276,6 +295,8 @@ export class Tab extends EventEmitter<TabEventsInterface> {
 
   private _addLogEntry(entry: EventEntry) {
     this._recentEventEntries.push(entry);
+    if (this._recentEventEntries.length > maxRecentEventEntries)
+      this._recentEventEntries.shift();
   }
 
   private _onClose() {

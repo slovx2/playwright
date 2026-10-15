@@ -64,7 +64,7 @@ async function installHttpTransport(httpServer: http.Server, serverBackendFactor
   const allowAnyHost = allowedHosts.includes('*');
 
   const sseSessions = new Map<string, { transport: SSEServerTransportType, scope: string, taskId?: string }>();
-  const streamableSessions = new Map();
+  const streamableSessions = new Map<string, StreamableSession>();
   httpServer.on('request', async (req, res) => {
     if (!allowAnyHost) {
       const host = req.headers.host?.toLowerCase();
@@ -146,6 +146,54 @@ async function installHttpTransport(httpServer: http.Server, serverBackendFactor
 
 type RequestClient = { scope: string, taskId?: string };
 
+type StreamableSession = {
+  transport: StreamableHTTPServerTransportType;
+  transportInitialized: ManualPromise<void>;
+  scope: string;
+  taskId?: string;
+  activeRequests: number;
+  idleTimer: NodeJS.Timeout | undefined;
+  closed: boolean;
+};
+
+const defaultSessionIdleTimeout = 30 * 60_000;
+
+const sessionIdleTimeout = (): number => {
+  const value = process.env.PLAYWRIGHT_MCP_SESSION_IDLE_TIMEOUT_MS;
+  if (value === undefined)
+    return defaultSessionIdleTimeout;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed))
+    return defaultSessionIdleTimeout;
+  return parsed;
+};
+
+// 心跳只在首次工具调用后才启动；从未调用工具就被丢下的会话，靠空闲超时回收。
+// 打开的请求（含 GET 事件流和进行中的工具调用）都算活动，全部结束后才开始计时。
+function trackSessionRequest(session: StreamableSession, res: http.ServerResponse) {
+  session.activeRequests++;
+  clearTimeout(session.idleTimer);
+  session.idleTimer = undefined;
+  res.on('close', () => {
+    session.activeRequests--;
+    if (session.activeRequests === 0)
+      scheduleIdleClose(session);
+  });
+}
+
+function scheduleIdleClose(session: StreamableSession) {
+  const timeout = sessionIdleTimeout();
+  if (timeout <= 0 || session.closed)
+    return;
+  session.idleTimer = setTimeout(() => {
+    session.idleTimer = undefined;
+    if (session.activeRequests === 0) {
+      testDebug(`close idle http session`);
+      void session.transport.close();
+    }
+  }, timeout);
+}
+
 async function handleSSE(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, url: URL, sessions: Map<string, { transport: SSEServerTransportType, scope: string, taskId?: string }>, client: RequestClient) {
   if (req.method === 'POST') {
     const sessionId = url.searchParams.get('sessionId');
@@ -181,7 +229,7 @@ async function handleSSE(serverBackendFactory: ServerBackendFactory, req: http.I
   res.end('Method not allowed');
 }
 
-async function handleStreamable(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, sessions: Map<string, { transport: StreamableHTTPServerTransportType, transportInitialized: ManualPromise<void>, scope: string, taskId?: string }>, client: RequestClient) {
+async function handleStreamable(serverBackendFactory: ServerBackendFactory, req: http.IncomingMessage, res: http.ServerResponse, sessions: Map<string, StreamableSession>, client: RequestClient) {
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
   if (sessionId) {
     const sessionInfo = sessions.get(sessionId);
@@ -195,6 +243,7 @@ async function handleStreamable(serverBackendFactory: ServerBackendFactory, req:
       res.end('MCP session belongs to another browser scope');
       return;
     }
+    trackSessionRequest(sessionInfo, res);
     if (req.method === 'GET') {
       // As per spec, GET is for the event stream only, when we see it consider transport bidirectionally ready.
       const streamResponse = sessionInfo.transport.handleRequest(req, res);
@@ -212,10 +261,12 @@ async function handleStreamable(serverBackendFactory: ServerBackendFactory, req:
       enableJsonResponse: true,
       onsessioninitialized: async sessionId => {
         testDebug(`create http session`);
-        const sessionInfo = { transport, transportInitialized: new ManualPromise<void>(), ...client };
+        const sessionInfo: StreamableSession = { transport, transportInitialized: new ManualPromise<void>(), ...client,
+          activeRequests: 0, idleTimer: undefined, closed: false };
         // Only give the client 5 seconds to reach for the event stream.
         setTimeout(() => sessionInfo.transportInitialized.resolve(), 5000);
         sessions.set(sessionId, sessionInfo);
+        trackSessionRequest(sessionInfo, res);
         await mcpServer.connect(serverBackendFactory, sessionInfo.transport, sessionInfo.transportInitialized, true, client.scope, client.taskId);
       }
     });
@@ -223,6 +274,11 @@ async function handleStreamable(serverBackendFactory: ServerBackendFactory, req:
     transport.onclose = () => {
       if (!transport.sessionId)
         return;
+      const sessionInfo = sessions.get(transport.sessionId);
+      if (sessionInfo) {
+        sessionInfo.closed = true;
+        clearTimeout(sessionInfo.idleTimer);
+      }
       sessions.delete(transport.sessionId);
       testDebug(`delete http session`);
     };

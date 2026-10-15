@@ -526,6 +526,70 @@ test('should not run heartbeat when timeout is non-positive', async ({ serverEnd
   await client.close();
 });
 
+async function postJsonRpc(url: URL, body: object, sessionId?: string) {
+  return await fetch(new URL('/mcp', url), {
+    method: 'POST',
+    headers: {
+      'accept': 'application/json, text/event-stream',
+      'content-type': 'application/json',
+      ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+async function initializeRawSession(url: URL): Promise<string> {
+  const response = await postJsonRpc(url, {
+    jsonrpc: '2.0', id: 1, method: 'initialize',
+    params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'raw', version: '1.0.0' } },
+  });
+  expect(response.status).toBe(200);
+  await response.text();
+  const sessionId = response.headers.get('mcp-session-id')!;
+  expect(sessionId).toBeTruthy();
+  const initialized = await postJsonRpc(url, { jsonrpc: '2.0', method: 'notifications/initialized' }, sessionId);
+  expect(initialized.status).toBe(202);
+  return sessionId;
+}
+
+test('closes a session that never calls a tool after the idle timeout', async ({ serverEndpoint }) => {
+  const { url, stderr } = await serverEndpoint({ env: { PLAYWRIGHT_MCP_SESSION_IDLE_TIMEOUT_MS: '500' } });
+  const sessionId = await initializeRawSession(url);
+
+  await expect.poll(() => formatLog(stderr())['close idle http session']).toBe(1);
+  expect(formatLog(stderr())['delete http session']).toBe(1);
+  const response = await postJsonRpc(url, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, sessionId);
+  expect(response.status).toBe(404);
+});
+
+test('idle timeout waits for in-flight tool calls', async ({ serverEndpoint, server }) => {
+  const { url, stderr } = await serverEndpoint({ env: {
+    PLAYWRIGHT_MCP_SESSION_IDLE_TIMEOUT_MS: '500',
+    PLAYWRIGHT_MCP_PING_TIMEOUT_MS: '0',
+  } });
+  const sessionId = await initializeRawSession(url);
+  const navigated = await postJsonRpc(url, {
+    jsonrpc: '2.0', id: 2, method: 'tools/call',
+    params: { name: 'browser_navigate', arguments: { url: server.HELLO_WORLD } },
+  }, sessionId);
+  expect(navigated.status).toBe(200);
+  await navigated.text();
+  const response = await postJsonRpc(url, {
+    jsonrpc: '2.0', id: 3, method: 'tools/call',
+    params: { name: 'browser_wait_for', arguments: { condition: { kind: 'delay', delayMs: 2000 }, timeoutMs: 5000 } },
+  }, sessionId);
+  expect(response.status).toBe(200);
+  const result = await response.json();
+  expect(result.result.isError, JSON.stringify(result)).not.toBe(true);
+  expect(formatLog(stderr())['close idle http session']).toBeUndefined();
+
+  // 请求结束后重新计时，空闲超时到了才关闭。
+  const listed = await postJsonRpc(url, { jsonrpc: '2.0', id: 4, method: 'tools/list' }, sessionId);
+  expect(listed.status).toBe(200);
+  await listed.text();
+  await expect.poll(() => formatLog(stderr())['close idle http session']).toBe(1);
+});
+
 test('should not allow rebinding to localhost', async ({ serverEndpoint }) => {
   const { url } = await serverEndpoint();
   const ip = await resolveToIp('localhost');

@@ -40,6 +40,7 @@ export class BrowserBackend implements ServerBackend {
   private _config: ContextConfig;
   private _disconnected = false;
   private _tabMetadataProvider: TabMetadataProvider | undefined;
+  private _markDisconnected = () => { this._disconnected = true; };
   readonly browserContext: playwright.BrowserContext;
 
   constructor(config: ContextConfig, browserContext: playwright.BrowserContext, tools: Tool[], tabMetadataProvider?: TabMetadataProvider) {
@@ -47,9 +48,8 @@ export class BrowserBackend implements ServerBackend {
     this._tools = tools;
     this.browserContext = browserContext;
     this._tabMetadataProvider = tabMetadataProvider;
-    const markDisconnected = () => { this._disconnected = true; };
-    this.browserContext.once('close', markDisconnected);
-    this.browserContext.browser()?.once('disconnected', markDisconnected);
+    this.browserContext.once('close', this._markDisconnected);
+    this.browserContext.browser()?.once('disconnected', this._markDisconnected);
   }
 
   async initialize(clientInfo: ClientInfo): Promise<void> {
@@ -63,6 +63,9 @@ export class BrowserBackend implements ServerBackend {
   }
 
   async dispose() {
+    // 共享的浏览器与上下文比会话活得久，不移除监听会让它们一直引用本会话的 Context 与 Tab。
+    this.browserContext.off('close', this._markDisconnected);
+    this.browserContext.browser()?.off('disconnected', this._markDisconnected);
     await this._context?.dispose().catch(e => debug('pw:tools:error')(e));
   }
 

@@ -153,10 +153,27 @@ export class Context {
   async dispose() {
     process.off('unhandledRejection', this._onUnhandledRejection);
     await disposeAll(this._disposables);
-    for (const tab of this._tabs)
+    for (const route of this._routes)
+      await this._rawBrowserContext.unroute(route.pattern, route.handler).catch(() => {});
+    this._routes = [];
+    for (const tab of this._tabs) {
       await tab.dispose();
+      // 仍打开的 page 保留状态与 id，供后续会话接管；已关闭的 page 不再需要。
+      if (tab.page.isClosed()) {
+        managedTabStates.delete(tab.page);
+        managedPageIds.delete(tab.page);
+      }
+    }
     this._tabs.length = 0;
     this._currentTab = undefined;
+    this._tabStates.clear();
+    this._tabClaims.clear();
+    this._tabMetadataPromise = undefined;
+    this._pageMetadataMapPromise = undefined;
+    this._primedTabMetadata = undefined;
+    this._lastTabMetadata = undefined;
+    this._pendingUnhandledRejections.length = 0;
+    this._unhandledRejectionListeners.clear();
     await this.stopVideoRecording();
   }
 
